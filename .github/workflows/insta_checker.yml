@@ -1,36 +1,46 @@
-name: Instagram DMCA Link Checker
+# .github/workflows/insta_checker.yml
+name: Instagram/YouTube/TikTok/Facebook Link Checker
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * *"
+    - cron: "0 2 * * *"   # 02:00 UTC daily
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/ms-playwright
+
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Install dependencies
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium
 
       - name: Write Google credentials
         shell: bash
         run: |
           cat > credentials.json <<'JSON'
-          ${{ secrets.GOOGLE_CREDENTIALS }}
+          ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           JSON
+
+      - name: Install Playwright browsers (Chromium)
+        run: |
+          npx -y playwright@1.44.0 install --with-deps chromium
+          python - <<'PY'
+          from pathlib import Path; p=Path.home()/'.cache/ms-playwright'
+          print('Browsers dir exists:', p.exists(), '->', p)
+          PY
 
       - name: Run script
         run: python check_instagram_links.py
