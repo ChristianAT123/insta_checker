@@ -7,7 +7,7 @@ on:
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04   # <-- pin to jammy to avoid 'noble' Playwright deps error
     timeout-minutes: 60
     env:
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
@@ -56,6 +56,14 @@ jobs:
         run: |
           wc -c credentials.json
           python -c 'b=open("credentials.json","rb").read(); print("first byte:", b[:1])'
+
+      - name: Assert hardened loader present
+        run: |
+          if grep -n "from_json_keyfile_name" check_instagram_links.py; then
+            echo "ERROR: old keyfile_name loader found; refusing to run."
+            exit 1
+          fi
+          sed -n '1,40p' check_instagram_links.py
 
       - name: Run script
         run: python check_instagram_links.py

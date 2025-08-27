@@ -30,10 +30,12 @@ def main() -> int:
         return 1
 
     pathlib.Path("credentials.json").write_text(raw, encoding="utf-8")
+
     gha_env = os.getenv("GITHUB_ENV")
     if gha_env:
         with open(gha_env, "a", encoding="utf-8") as f:
             f.write(f"GOOGLE_APPLICATION_CREDENTIALS={os.getcwd()}/credentials.json\n")
+
     print("Wrote credentials.json; keys:", ", ".join(sorted(obj.keys())))
     return 0
 
