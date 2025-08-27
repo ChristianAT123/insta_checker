@@ -52,5 +52,14 @@ jobs:
       - name: Prepare Google credentials (raw JSON or base64)
         run: python scripts/prepare_google_creds.py
 
+      - name: Inspect credentials.json (debug)
+        run: |
+          wc -c credentials.json
+          python - <<'PY'
+with open("credentials.json","rb") as f:
+    b=f.read()
+print("first byte:", b[:1])
+PY
+
       - name: Run script
         run: python check_instagram_links.py
