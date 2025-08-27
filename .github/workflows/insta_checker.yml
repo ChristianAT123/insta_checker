@@ -6,6 +6,7 @@ on:
 jobs:
   run-checker:
     runs-on: ubuntu-22.04
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -21,22 +22,39 @@ jobs:
           pip install -r requirements.txt
           playwright install --with-deps
 
+      # Write credentials.json correctly. If the secret is base64, decode it.
       - name: Write Google credentials
         shell: bash
-        run: echo "${{ secrets.GOOGLE_CREDENTIALS }}" > credentials.json
+        env:
+          RAW_JSON: ${{ secrets.GOOGLE_CREDENTIALS }}
+          B64_JSON: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${B64_JSON:-}" ]]; then
+            echo "Using GOOGLE_CREDENTIALS_B64"
+            printf '%s' "$B64_JSON" | base64 -d > credentials.json
+          else
+            echo "Using GOOGLE_CREDENTIALS"
+            # printf preserves exact bytes; echo may mangle newlines/backslashes
+            printf '%s' "$RAW_JSON" > credentials.json
+          fi
+          # Quick sanity check that file starts with '{' and ends with '}'
+          head -c 1 credentials.json | grep -q '{'
+          tail -c 1 credentials.json | grep -q '}' || true
 
       - name: Inspect credentials.json (debug)
         run: >
           python -c "import json, pathlib;
           b=pathlib.Path('credentials.json').read_bytes();
-          print('first byte:', b[:1]);
-          print('keys:', sorted(json.loads(b.decode('utf-8')).keys()))"
+          print('len:', len(b), 'first:', b[:1]);
+          obj=json.loads(b.decode('utf-8'));
+          print('keys:', sorted(obj.keys()))"
 
       - name: Assert hardened loader present
         shell: bash
         run: |
           if grep -nE 'from_json_keyfile_name[[:space:]]*\(' check_instagram_links.py; then
-            echo "ERROR: old keyfile_name loader found; refusing to run."
+            echo 'ERROR: old keyfile_name loader found; refusing to run.'
             exit 1
           fi
 
