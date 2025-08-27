@@ -1,94 +1,59 @@
----
-name: Link checker (Logs primary)
+name: Instagram Link Checker
 
 on:
   workflow_dispatch:
     inputs:
       shard_index:
-        description: 'Shard index (0-based)'
+        description: "Shard index (0-based)"
         required: false
         default: "0"
-      shard_total:
-        description: 'Total shards'
+      total_shards:
+        description: "Total shards"
         required: false
         default: "1"
       skip_recent_days:
-        description: 'Skip rows with last-checked newer than N days'
+        description: "Skip rows with last-checked newer than N days"
         required: false
         default: "0"
   schedule:
-    # 10pm Eastern ≈ 03:00 UTC while DST. Adjust to 02:00 UTC in winter if you prefer.
-    - cron: "0 3 * * *"
+    - cron: "0 2 * * *"  # 10 PM EST (2 AM UTC)
 
 jobs:
   linkcheck:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    env:
-      SHEET_ID: "1fFTIEDy-86lDaCgll1GkTq376hvrTd-DXulioXrDAgw"
-      SHEET_TAB: "Logs"
-      URL_COL_INDEX_1BASED: "6"   # F
-      STATUS_COL_INDEX_1BASED: "13" # M
-      REMOVAL_COL_INDEX_1BASED: "14" # N
-      LASTCHECK_COL_INDEX_1BASED: "15" # O
-      SHARD_INDEX: "${{ inputs.shard_index }}"
-      SHARD_TOTAL: "${{ inputs.shard_total }}"
-      SKIP_RECENT_DAYS: "${{ inputs.skip_recent_days }}"
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
 
-      - name: Install Python deps + Playwright
+      - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # Playwright browsers (Chromium only)
           playwright install --with-deps chromium
 
-      # Write credentials.json from secret (raw JSON or base64 string)
       - name: Write Google credentials
         shell: bash
-        env:
-          SECRET: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
         run: |
-          python - <<'PY'
-          import os, sys, json, base64, pathlib
-          s = (os.environ.get("SECRET") or "").strip()
-          if not s:
-              print("ERROR: GOOGLE_CREDENTIALS_JSON secret is empty.", file=sys.stderr)
-              sys.exit(1)
-          if not s.lstrip().startswith("{"):
-              try:
-                  s = base64.b64decode(s).decode("utf-8")
-              except Exception as e:
-                  print(f"ERROR: Secret is not raw JSON and base64 decode failed: {e}", file=sys.stderr)
-                  sys.exit(1)
-          try:
-              obj = json.loads(s)
-          except Exception as e:
-              print(f"ERROR: Invalid JSON in secret: {e}", file=sys.stderr)
-              sys.exit(1)
-          pathlib.Path("credentials.json").write_text(json.dumps(obj), encoding="utf-8")
-          print("OK: credentials.json written.")
-          PY
+          if [ -z "${{ secrets.GOOGLE_CREDENTIALS }}" ]; then
+            echo "ERROR: GOOGLE_CREDENTIALS secret is empty."
+            exit 1
+          fi
+          echo "${{ secrets.GOOGLE_CREDENTIALS }}" > credentials.json
 
-      # Lightweight debug: shows first byte + top-level keys of the JSON we just wrote
       - name: Inspect credentials.json (debug)
         run: |
+          wc -c credentials.json
           python - <<'PY'
-          import json, pathlib
-          b = pathlib.Path("credentials.json").read_bytes()
-          print("first byte:", b[:1])
-          print("keys:", sorted(json.loads(b.decode("utf-8")).keys()))
-          PY
+import json, pathlib
+b = pathlib.Path("credentials.json").read_bytes()
+print("first byte:", b[:1])
+print("keys:", sorted(json.loads(b.decode("utf-8")).keys()))
+PY
 
-      # Prevent regressions: disallow from_json_keyfile_name in your checker script
       - name: Assert hardened loader present
         shell: bash
         run: |
@@ -96,29 +61,32 @@ jobs:
             echo "ERROR: old keyfile_name loader found; refusing to run."
             exit 1
           fi
-          sed -n '1,60p' check_instagram_links.py
+          sed -n '1,40p' check_instagram_links.py
 
-      # Count URLs in Logs!F (so you see the sheet is reachable)
       - name: Count current URLs in Logs!F
         id: count
         run: |
           TOTAL=$(python - <<'PY'
-          import json, gspread
-          from oauth2client.service_account import ServiceAccountCredentials as S
-          SHEET_ID = "${SHEET_ID}"
-          TAB = "${SHEET_TAB}"
-          URL_COL = int("${URL_COL_INDEX_1BASED}")
-          scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-          d=json.load(open("credentials.json","r",encoding="utf-8"))
-          gc=gspread.authorize(S.from_json_keyfile_dict(d, scope))
-          ws=gc.open_by_key(SHEET_ID).worksheet(TAB)
-          col=ws.col_values(URL_COL)
-          total=sum(1 for v in col[1:] if (v or "").strip())
-          print(total)
-          PY
-          )
+import json, gspread
+from oauth2client.service_account import ServiceAccountCredentials
+scope = [
+  "https://spreadsheets.google.com/feeds",
+  "https://www.googleapis.com/auth/drive",
+]
+with open("credentials.json","r",encoding="utf-8") as f:
+    creds_dict = json.load(f)
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+gc = gspread.authorize(creds)
+ws = gc.open_by_key("1fFTIEDy-86lDaCgll1GkTq376hvrTd-DXulioXrDAgw").worksheet("Logs")
+col = ws.col_values(6)  # Column F
+print(sum(1 for v in col[1:] if (v or "").strip()))
+PY
+)
           echo "total=${TOTAL}" | tee -a "$GITHUB_OUTPUT"
 
       - name: Run script
-        run: |
-          python -u check_instagram_links.py
+        run: python -u check_instagram_links.py
+        env:
+          SHARD_INDEX: ${{ github.event.inputs.shard_index || 0 }}
+          TOTAL_SHARDS: ${{ github.event.inputs.total_shards || 1 }}
+          SKIP_RECENT_DAYS: ${{ github.event.inputs.skip_recent_days || 0 }}
