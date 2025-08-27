@@ -60,7 +60,8 @@ def get_gspread_client():
         if path and os.path.isfile(path):
             try:
                 raw = open(path, "rb").read()
-                raw = raw.lstrip(b"\xef\xbb\xbf\r\n\t ")  # strip BOM/whitespace/newlines
+                # strip BOM/whitespace/newlines to avoid JSONDecodeError
+                raw = raw.lstrip(b"\xef\xbb\xbf\r\n\t ")
                 creds_dict = json.loads(raw.decode("utf-8"))
                 return gspread.authorize(
                     ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
