@@ -46,17 +46,33 @@ REMOVAL_TEXT = {
 
 # ========= HELPERS =========
 def get_gspread_client():
-    """Use env secret if present (Actions), else local credentials.json."""
+    """
+    Accept credentials from:
+      - GOOGLE_CREDENTIALS (JSON string)
+      - GOOGLE_CREDENTIALS_JSON (JSON string)
+      - GOOGLE_APPLICATION_CREDENTIALS (filepath)
+      - fallback to local 'credentials.json' file
+    """
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds_env = os.getenv("GOOGLE_CREDENTIALS")
+
+    # Prefer JSON string envs
+    creds_env = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GOOGLE_CREDENTIALS_JSON")
     if creds_env:
         creds_dict = json.loads(creds_env)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    else:
-        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+        return gspread.authorize(creds)
+
+    # Then prefer file path env (created by workflow step)
+    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if cred_path and os.path.isfile(cred_path):
+        creds = ServiceAccountCredentials.from_json_keyfile_name(cred_path, scope)
+        return gspread.authorize(creds)
+
+    # Finally, local file fallback
+    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     return gspread.authorize(creds)
 
 
