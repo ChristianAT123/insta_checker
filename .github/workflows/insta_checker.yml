@@ -9,7 +9,6 @@ jobs:
   run:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -33,9 +32,6 @@ jobs:
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: |
-          if [ -z "${GOOGLE_CREDENTIALS}" ]; then
-            echo "ERROR: GOOGLE_CREDENTIALS secret is empty"; exit 1
-          fi
           printf "%s" "${GOOGLE_CREDENTIALS}" > credentials.json
 
       - name: Inspect credentials.json (debug)
@@ -43,10 +39,10 @@ jobs:
         run: |
           wc -c credentials.json
           python - <<'PY'
-import json, pathlib
-b = pathlib.Path("credentials.json").read_bytes()
-print("first byte:", b[:1])
-print("keys:", sorted(json.loads(b.decode("utf-8")).keys()))
+            import json, pathlib
+            b = pathlib.Path("credentials.json").read_bytes()
+            print("first byte:", b[:1])
+            print("keys:", sorted(json.loads(b.decode("utf-8")).keys()))
 PY
 
       - name: Assert hardened loader present
