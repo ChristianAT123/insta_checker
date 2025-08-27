@@ -1,25 +1,26 @@
-name: Instagram DMCA Link Checker
+name: Instagram Link Checker
 
 on:
   schedule:
-    - cron: "0 2 * * *"
-  workflow_dispatch: {}
+    - cron: "0 12 * * *"   # runs every day at 12:00 UTC
+  workflow_dispatch:        # allow manual run
 
 jobs:
-  run:
+  run-script:
     runs-on: ubuntu-latest
-    container: mcr.microsoft.com/playwright/python:v1.44.0-jammy
-    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-      - name: Install Python deps
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Write Google credentials
-        env:
-          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-        run: echo "$GOOGLE_CREDENTIALS_JSON" > credentials.json
-
       - name: Run script
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: python check_instagram_links.py
