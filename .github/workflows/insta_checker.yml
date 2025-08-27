@@ -1,29 +1,79 @@
-def get_gspread_client():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    # Prefer env JSON (raw or base64)
-    creds_env = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if creds_env:
-        s = creds_env.strip()
-        if not s.lstrip().startswith("{"):
-            import base64
-            try:
-                s = base64.b64decode(s).decode("utf-8")
-            except Exception:
-                pass
-        try:
-            creds_dict = json.loads(s)
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            return gspread.authorize(creds)
-        except Exception:
-            pass
-    # Then file path
-    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if cred_path and os.path.isfile(cred_path):
-        creds = ServiceAccountCredentials.from_json_keyfile_name(cred_path, scope)
-        return gspread.authorize(creds)
-    # Fallback to local file
-    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-    return gspread.authorize(creds)
+name: Instagram DMCA Link Checker
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 12 * * *"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Paste your service account either as RAW JSON or BASE64 of the JSON
+      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS }}
+      PYTHONWARNINGS: ignore::DeprecationWarning
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-ms-playwright-
+
+      - name: Install Playwright browsers
+        uses: microsoft/playwright-github-action@v1
+        with:
+          with-deps: true
+
+      # Robust creds writer: supports RAW or BASE64 secret, validates JSON
+      - name: Prepare Google credentials
+        shell: bash
+        run: |
+          python - << 'PY'
+import os, json, base64, sys, pathlib
+val = os.getenv("GOOGLE_CREDENTIALS") or ""
+val = val.strip()
+if not val:
+    print("ERROR: GOOGLE_CREDENTIALS secret is empty", file=sys.stderr); sys.exit(1)
+# If it doesn't start with "{", try base64 decode
+if not val.lstrip().startswith("{"):
+    try:
+        val = base64.b64decode(val).decode("utf-8")
+    except Exception as e:
+        print("ERROR: Secret is not raw JSON and base64 decode failed:", e, file=sys.stderr); sys.exit(1)
+# Validate JSON
+try:
+    obj = json.loads(val)
+except Exception as e:
+    print("ERROR: credentials are not valid JSON:", e, file=sys.stderr); sys.exit(1)
+pathlib.Path("credentials.json").write_text(val, encoding="utf-8")
+print("Wrote credentials.json with keys:", ", ".join(sorted(obj.keys())))
+PY
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/credentials.json" >> "$GITHUB_ENV"
+
+      - name: Run script
+        run: python check_instagram_links.py
