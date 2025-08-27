@@ -1,26 +1,52 @@
-name: Instagram Link Checker
+# .github/workflows/insta_checker.yml
+name: Link Checker
 
 on:
   schedule:
-    - cron: "0 12 * * *"   # runs every day at 12:00 UTC
-  workflow_dispatch:        # allow manual run
+    - cron: "0 2 * * *"
+  workflow_dispatch:
 
 jobs:
-  run-script:
-    runs-on: ubuntu-latest
+  run:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Python deps
         run: pip install -r requirements.txt
 
-      - name: Run script
+      - name: Install Playwright (Chromium) + system deps
+        run: python -m playwright install --with-deps chromium
+
+      - name: Write Google credentials
         env:
+          GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: python check_instagram_links.py
+        run: |
+          if [ -n "$GOOGLE_CREDENTIALS_B64" ]; then
+            python - <<'PY'
+import os, base64, json
+data = base64.b64decode(os.environ["GOOGLE_CREDENTIALS_B64"]).decode("utf-8")
+json.loads(data)
+open("credentials.json","w").write(data)
+PY
+          elif [ -n "$GOOGLE_CREDENTIALS" ]; then
+            python - <<'PY'
+import os, json
+data = os.environ["GOOGLE_CREDENTIALS"]
+json.loads(data)
+open("credentials.json","w").write(data)
+PY
+          else
+            echo "Missing GOOGLE_CREDENTIALS secret" && exit 1
+
+      - name: Run checker
+        run: python check_links_multi.py
