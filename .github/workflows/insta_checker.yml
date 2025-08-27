@@ -50,39 +50,7 @@ jobs:
           with-deps: true
 
       - name: Prepare Google credentials (raw JSON or base64)
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${GOOGLE_CREDENTIALS:?GOOGLE_CREDENTIALS secret is empty or not set}"
-          tmpfile="$(mktemp)"
-          printf '%s' "$GOOGLE_CREDENTIALS" > "$tmpfile"
-
-          if head -c1 "$tmpfile" | grep -q '{'; then
-            cp "$tmpfile" credentials.json
-          else
-            base64 -d "$tmpfile" > credentials.json || { echo "Secret was not JSON and base64 decode failed."; exit 1; }
-          fi
-
-          echo "credentials.json bytes: $(wc -c < credentials.json)"
-
-          python - <<'PY'
-import json, sys
-with open("credentials.json","rb") as f:
-    b=f.read()
-    if not b or b[:1] in (b"\n", b"\r"):
-        print("credentials.json starts with newline or is empty", file=sys.stderr); sys.exit(1)
-    try:
-        obj=json.loads(b.decode("utf-8"))
-    except Exception as e:
-        print("Invalid JSON:", e, file=sys.stderr); sys.exit(1)
-    required=("type","project_id","private_key_id","private_key","client_email","client_id","auth_uri","token_uri")
-    missing=[k for k in required if k not in obj]
-    if missing:
-        print("Missing expected keys:", ", ".join(missing), file=sys.stderr); sys.exit(1)
-print("credentials.json looks valid.")
-PY
-
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$GITHUB_WORKSPACE/credentials.json" >> "$GITHUB_ENV"
+        run: python scripts/prepare_google_creds.py
 
       - name: Run script
         run: python check_instagram_links.py
