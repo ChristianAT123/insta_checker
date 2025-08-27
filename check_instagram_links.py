@@ -1,5 +1,3 @@
-# check_instagram_links.py  (multi-platform)
-
 import os
 import re
 import json
@@ -12,14 +10,13 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from playwright.sync_api import sync_playwright
 
-# ========= CONFIG =========
 SPREADSHEET_ID = "1ps5Luzxgk0nNGWqTPCw9y9MhgCCnoAuKpZ73UmlanPE"
 SHEET_NAME = "Sheet1"
 
-START_ROW = 2                  # first data row (A2...)
-DELAY_SEC = (4, 7)             # polite delay between checks
-NAV_TIMEOUT_MS = 15000         # Playwright navigation timeout
-SETTLE_SLEEP_S = 3             # extra settle time
+START_ROW = 2
+DELAY_SEC = (4, 7)
+NAV_TIMEOUT_MS = 15000
+SETTLE_SLEEP_S = 3
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -27,32 +24,14 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Removal text by platform
 REMOVAL_TEXT = {
-    "instagram": [
-        "Sorry, this page isn't available.",
-    ],
-    "youtube": [
-        "This video isn't available anymore",
-        "Video unavailable",
-    ],
-    "tiktok": [
-        "Video currently unavailable",
-    ],
-    "facebook": [
-        "This content isn't available right now",
-    ],
+    "instagram": ["Sorry, this page isn't available."],
+    "youtube": ["This video isn't available anymore", "Video unavailable"],
+    "tiktok": ["Video currently unavailable"],
+    "facebook": ["This content isn't available right now"],
 }
 
-# ========= HELPERS =========
 def get_gspread_client():
-    """
-    Accept credentials from:
-      - GOOGLE_CREDENTIALS (JSON string; raw or base64)
-      - GOOGLE_CREDENTIALS_JSON (JSON string; raw or base64)
-      - GOOGLE_APPLICATION_CREDENTIALS (filepath)
-      - fallback to local 'credentials.json' file
-    """
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
@@ -70,29 +49,28 @@ def get_gspread_client():
                 pass
         try:
             creds_dict = json.loads(s)
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            return gspread.authorize(creds)
+            return gspread.authorize(
+                ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            )
         except Exception:
-            pass  # fall through
+            pass  # fall through to file path
 
-    # Then GOOGLE_APPLICATION_CREDENTIALS path
-    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    for path in [cred_path, "credentials.json"]:
+    # Then GOOGLE_APPLICATION_CREDENTIALS path, then local credentials.json
+    for path in [os.getenv("GOOGLE_APPLICATION_CREDENTIALS"), "credentials.json"]:
         if path and os.path.isfile(path):
             try:
                 raw = open(path, "rb").read()
-                # strip BOM/whitespace/newlines to avoid JSONDecodeError
-                raw = raw.lstrip(b"\xef\xbb\xbf\r\n\t ")
+                raw = raw.lstrip(b"\xef\xbb\xbf\r\n\t ")  # strip BOM/whitespace/newlines
                 creds_dict = json.loads(raw.decode("utf-8"))
-                creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-                return gspread.authorize(creds)
+                return gspread.authorize(
+                    ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+                )
             except Exception:
                 continue
 
     raise RuntimeError("Could not load Google credentials from env or file.")
 
 def detect_platform(url: str) -> str:
-    """Return 'instagram' | 'youtube' | 'tiktok' | 'facebook' | 'unknown'."""
     try:
         host = urlparse(url).netloc.lower()
     except Exception:
@@ -108,10 +86,6 @@ def detect_platform(url: str) -> str:
     return "unknown"
 
 def looks_like_fb_watch_home(url: str) -> bool:
-    """
-    Treat redirect to /watch/ with no ?v= as 'Removed' for Facebook videos,
-    per your note (e.g., https://www.facebook.com/watch/).
-    """
     try:
         parsed = urlparse(url)
         if "facebook.com" not in parsed.netloc.lower():
@@ -128,12 +102,6 @@ def contains_any(haystack: str, needles: list[str]) -> bool:
     return any(n in haystack for n in needles)
 
 def check_one(page, url: str) -> tuple[str, str]:
-    """
-    Navigate and classify.
-    Returns (status, error_details).
-      status: "Active" | "Removed" | "Unknown"
-      error_details: "Code: NNN" or "Error: ..."
-    """
     platform = detect_platform(url)
     try:
         resp = page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
@@ -142,30 +110,23 @@ def check_one(page, url: str) -> tuple[str, str]:
         html = page.content()
         final_url = page.url
 
-        # Facebook special: redirected to /watch/ without v= param
         if platform == "facebook" and looks_like_fb_watch_home(final_url):
             return "Removed", f"Code: {code} (redirected to /watch/)"
 
-        # Phrase checks
         phrases = REMOVAL_TEXT.get(platform, [])
         if phrases and contains_any(html, phrases):
             return "Removed", f"Code: {code}"
 
-        # Basic success heuristic: 2xx/3xx & no removal phrase -> Active
         if code and 200 <= code < 400:
             return "Active", f"Code: {code}"
 
-        # Non-success code without explicit phrase -> Unknown
         return "Unknown", f"Code: {code}"
-
     except Exception as e:
         return "Unknown", f"Error: {e}"
 
-# ========= MAIN =========
 def main():
     client = get_gspread_client()
     sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-
     rows = sheet.get_all_values()
     if not rows:
         print("No data in sheet.")
@@ -180,7 +141,7 @@ def main():
         page = context.new_page()
 
         for i in range(START_ROW - 1, len(rows)):
-            row_num = i + 1  # 1-based
+            row_num = i + 1
             row = rows[i]
             link = row[0].strip() if len(row) >= 1 else ""
             current_status = row[1].strip().lower() if len(row) >= 2 else ""
@@ -195,7 +156,6 @@ def main():
             print(f"🔍 Checking row {row_num}: {link}")
             status, details = check_one(page, link)
 
-            # For sheet: B=status, C=removal date, D=last checked, E=error details
             removal_date = today if status == "Removed" else ""
             last_checked = today
 
