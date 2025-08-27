@@ -1,40 +1,36 @@
-name: Instagram + YouTube + TikTok + Facebook Link Checker
+name: Instagram DMCA Link Checker
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "0 2 * * *"     # daily at 02:00 UTC
-  workflow_dispatch:        # allow manual runs
+    - cron: "0 12 * * *"
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Playwright browsers (Chromium)
-        run: |
-          npx -y playwright@1.44.0 install --with-deps chromium
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
 
       - name: Write Google credentials
         shell: bash
         run: |
           cat > credentials.json <<'JSON'
-${{ secrets.GOOGLE_CREDENTIALS }}
-JSON
+          ${{ secrets.GOOGLE_CREDENTIALS }}
+          JSON
 
-      - name: Run link checker
-        run: |
-          python check_instagram_links.py
+      - name: Run script
+        run: python check_instagram_links.py
