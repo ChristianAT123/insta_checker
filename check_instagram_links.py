@@ -1,224 +1,202 @@
-# check_instagram_links.py  (multi-platform, hardened + no keyfile_name)
-
+#!/usr/bin/env python3
 import os
 import re
 import json
 import time
-import random
-from urllib.parse import urlparse, parse_qs
-from datetime import datetime
+import math
+import datetime as dt
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from playwright.sync_api import sync_playwright
 
-# ========= CONFIG =========
-SPREADSHEET_ID = "1ps5Luzxgk0nNGWqTPCw9y9MhgCCnoAuKpZ73UmlanPE"
-SHEET_NAME = "Sheet1"
+# ===== Spreadsheet config (PRIMARY sheet) =====
+SHEET_ID = "1fFTIEDy-86lDaCgll1GkTq376hvrTd-DXulioXrDAgw"
+TAB = "Logs"
 
-START_ROW = 2
-DELAY_SEC = (4, 7)
-NAV_TIMEOUT_MS = 20000            # FB can be slow
-SETTLE_SLEEP_S = 4
+# Column mapping (1-based)
+COL_URL = 6           # F  Infringing URL
+COL_STATUS = 13       # M  Status
+COL_REMOVAL_DATE = 14 # N  Removal Date
+COL_LAST_CHECKED = 15 # O  Last Checked
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
+# Text markers that indicate FB content is gone (unauthenticated views)
+FB_REMOVED_PATTERNS = [
+    "this page isn't available right now",
+    "this video isn't available anymore",
+    "the link may be broken or the video may have been removed",
+    "content isn't available",
+    "page isn't available",
+]
+FB_REMOVED_RE = re.compile("|".join(re.escape(s) for s in FB_REMOVED_PATTERNS), re.I)
 
-REMOVAL_TEXT = {
-    "instagram": [
-        "Sorry, this page isn't available.",
-    ],
-    "youtube": [
-        "This video isn't available anymore",
-        "Video unavailable",
-    ],
-    "tiktok": [
-        "Video currently unavailable",
-    ],
-    "facebook": [
-        "This page isn't available right now",
-        "This content isn't available right now",
-        "This Video Isn't Available Anymore",
-        "The link may be broken or the video may have been removed",
-    ],
-}
+# ===== Controls via env =====
+SHARD_INDEX = int(os.environ.get("SHARD_INDEX", "0"))
+TOTAL_SHARDS = max(1, int(os.environ.get("TOTAL_SHARDS", "1")))
+SKIP_RECENT_DAYS = int(os.environ.get("SKIP_RECENT_DAYS", "0"))
 
-# ========= HELPERS =========
-def get_gspread_client():
-    """
-    Accept credentials from:
-      - GOOGLE_CREDENTIALS or GOOGLE_CREDENTIALS_JSON (raw JSON string, may be base64)
-      - GOOGLE_APPLICATION_CREDENTIALS (path to JSON)
-      - fallback to local credentials.json
-    Always parse JSON and use from_json_keyfile_dict (never from_json_keyfile_name).
-    """
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
+SCOPES = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
 
-    raw = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if raw:
-        s = raw.strip()
-        if not s.lstrip().startswith("{"):
-            try:
-                import base64
-                s = base64.b64decode(s).decode("utf-8")
-            except Exception:
-                pass
-        creds_dict = json.loads(s)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        return gspread.authorize(creds)
-
-    cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if cred_path and os.path.isfile(cred_path):
-        with open(cred_path, "r", encoding="utf-8") as f:
-            creds_dict = json.load(f)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        return gspread.authorize(creds)
-
-    with open("credentials.json", "r", encoding="utf-8") as f:
-        creds_dict = json.load(f)
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+def make_gspread_client():
+    """Hardened credentials loader: env var first, then local file."""
+    raw = (os.environ.get("GOOGLE_CREDENTIALS_JSON") or "").strip()
+    if not raw:
+        raw = open("credentials.json", "r", encoding="utf-8").read()
+    creds_dict = json.loads(raw)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPES)
     return gspread.authorize(creds)
 
+def is_facebook_removed_text(body_text: str) -> bool:
+    if not body_text:
+        return False
+    return bool(FB_REMOVED_RE.search(body_text))
 
-def detect_platform(url: str) -> str:
+def decide_status_for_url(pw, url: str) -> tuple[str, int]:
+    """
+    Returns (status_str, http_code)
+    Status is one of: "Active", "Removed", "Unknown"
+    """
+    # Fast path: non-Facebook — treat 200 presence/404 etc. with a simple fetch
+    if "facebook.com" not in url:
+        try:
+            resp = pw.request.get(url, timeout=20000)
+            code = resp.status()
+            if code == 404 or code == 410:
+                return "Removed", code
+            if 200 <= code < 300:
+                return "Active", code
+            return "Unknown", code
+        except Exception:
+            return "Unknown", 0
+
+    # Facebook: use a real browser page (to render the login wall + text)
+    code = 0
     try:
-        host = urlparse(url).netloc.lower()
+        page = pw.chromium.launch(headless=True).new_context().new_page()
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        if resp:
+            code = resp.status
+        # Grab visible text (even if a login modal is present)
+        text = page.text_content("body") or ""
+        text = " ".join(text.split())
+        # If the page clearly shows a "removed" banner text, treat as Removed
+        if is_facebook_removed_text(text):
+            page.close()
+            return "Removed", code or 200
+        # Some reels redirect to generic /reel or /watch and show a removed banner
+        # Check again after small wait for any late banner render
+        page.wait_for_timeout(1000)
+        text2 = page.text_content("body") or ""
+        if is_facebook_removed_text(text2):
+            page.close()
+            return "Removed", code or 200
+        # Otherwise if HTTP 200 and no removal banner, call it Active
+        page.close()
+        if 200 <= (code or 200) < 300:
+            return "Active", code or 200
+        if code in (404, 410):
+            return "Removed", code
+        return "Unknown", code or 0
     except Exception:
-        return "unknown"
-    if "instagram.com" in host:
-        return "instagram"
-    if "youtube.com" in host or "youtu.be" in host:
-        return "youtube"
-    if "tiktok.com" in host:
-        return "tiktok"
-    if "facebook.com" in host or "fb.watch" in host:
-        return "facebook"
-    return "unknown"
+        return "Unknown", code or 0
 
+def shard_range(total_rows: int, shard_idx: int, shard_count: int) -> range:
+    """Return the row indexes (1-based data rows excluding header) for this shard."""
+    if shard_count <= 1:
+        return range(2, total_rows + 1)
+    # we will distribute (rows 2..total_rows) evenly
+    data_count = max(0, total_rows - 1)
+    chunk = math.ceil(data_count / shard_count)
+    start = 2 + shard_idx * chunk
+    end = min(total_rows, 1 + (shard_idx + 1) * chunk)
+    if start > total_rows:
+        return range(0, 0)
+    return range(start, end + 1)
 
-def looks_like_fb_watch_home(url: str) -> bool:
-    """Redirect to /watch/ without v= param counts as Removed."""
+def should_skip_recent(last_checked_str: str) -> bool:
+    if SKIP_RECENT_DAYS <= 0:
+        return False
+    if not last_checked_str:
+        return False
     try:
-        parsed = urlparse(url)
-        if "facebook.com" not in parsed.netloc.lower():
+        # Accept both MM/DD/YYYY and ISO
+        for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+            try:
+                d = dt.datetime.strptime(last_checked_str.strip(), fmt).date()
+                break
+            except Exception:
+                d = None
+        if not d:
             return False
-        if re.fullmatch(r"/watch/?", parsed.path):
-            qs = parse_qs(parsed.query or "")
-            return "v" not in qs or len(qs.get("v", [])) == 0
-        return False
+        return (dt.date.today() - d).days < SKIP_RECENT_DAYS
     except Exception:
         return False
 
-
-def contains_any(haystack: str, needles: list[str]) -> bool:
-    haystack = haystack or ""
-    return any(n in haystack for n in needles)
-
-
-def fb_removed_via_locators(page) -> bool:
-    """Detect FB 'removed' banners even with a login modal present."""
-    patterns = [
-        r"This\s+page\s+isn'?t\s+available\s+right\s+now",
-        r"This\s+content\s+isn'?t\s+available\s+right\s+now",
-        r"This\s+Video\s+Isn'?t\s+Available\s+Anymore",
-        r"The\s+link\s+may\s+be\s+broken\s+or\s+the\s+video\s+may\s+have\s+been\s+removed",
-    ]
-    for pat in patterns:
-        if page.locator(f"text=/{pat}/i").count() > 0:
-            return True
-    return False
-
-
-def check_one(page, url: str) -> tuple[str, str]:
-    platform = detect_platform(url)
-    try:
-        resp = page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="networkidle")
-        time.sleep(SETTLE_SLEEP_S)
-        code = resp.status if resp else 0
-        html = page.content()
-        final_url = page.url
-
-        if platform == "facebook" and looks_like_fb_watch_home(final_url):
-            return "Removed", f"Code: {code} (redirected to /watch/)"
-
-        phrases = REMOVAL_TEXT.get(platform, [])
-        if phrases and contains_any(html, phrases):
-            return "Removed", f"Code: {code}"
-
-        if platform == "facebook" and fb_removed_via_locators(page):
-            return "Removed", f"Code: {code} (banner)"
-
-        if code and 200 <= code < 400:
-            return "Active", f"Code: {code}"
-
-        return "Unknown", f"Code: {code}"
-
-    except Exception as e:
-        return "Unknown", f"Error: {e}"
-
-
-# ========= MAIN =========
 def main():
-    client = get_gspread_client()
-    sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+    gc = make_gspread_client()
+    ws = gc.open_by_key(SHEET_ID).worksheet(TAB)
 
-    rows = sheet.get_all_values()
-    if not rows:
-        print("No data in sheet.")
+    # Get dimensions
+    values = ws.get_all_values()
+    total_rows = len(values)
+    if total_rows <= 1:
+        print("No data rows.")
         return
 
+    # Determine rows to process for this shard
+    rows_range = shard_range(total_rows, SHARD_INDEX, TOTAL_SHARDS)
+
+    # Batch reading of the needed columns
+    urls = ws.col_values(COL_URL)
+    statuses = ws.col_values(COL_STATUS)
+    last_checked_list = ws.col_values(COL_LAST_CHECKED)
+
+    # Prepare batch updates
     updates = []
-    today = datetime.now().strftime("%m/%d/%Y")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=USER_AGENT,
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-        )
-        page = context.new_page()
-
-        for i in range(START_ROW - 1, len(rows)):
-            row_num = i + 1
-            row = rows[i]
-            link = row[0].strip() if len(row) >= 1 else ""
-            current_status = row[1].strip().lower() if len(row) >= 2 else ""
-
-            if not link:
-                print(f"⏭️  Skipping row {row_num} (no URL)")
-                continue
-            if current_status == "removed":
-                print(f"⏭️  Skipping row {row_num} (status: 'removed')")
+        for r in rows_range:
+            # Safety for short columns
+            url = (urls[r-1] if r-1 < len(urls) else "").strip()
+            if not url:
                 continue
 
-            print(f"🔍 Checking row {row_num}: {link}")
-            status, details = check_one(page, link)
+            last_checked = (last_checked_list[r-1] if r-1 < len(last_checked_list) else "").strip()
+            if should_skip_recent(last_checked):
+                continue
 
-            removal_date = today if status == "Removed" else ""
-            last_checked = today
+            status, code = decide_status_for_url(p, url)
 
+            # Write status
             updates.append({
-                "range": f"B{row_num}:E{row_num}",
-                "values": [[status, removal_date, last_checked, details]],
+                "range": gspread.utils.rowcol_to_a1(r, COL_STATUS),
+                "values": [[status]],
+            })
+            # Removal Date only when status becomes Removed
+            if status.lower() == "removed":
+                today = dt.date.today().strftime("%m/%d/%Y")
+                updates.append({
+                    "range": gspread.utils.rowcol_to_a1(r, COL_REMOVAL_DATE),
+                    "values": [[today]],
+                })
+            # Always set Last Checked
+            today = dt.date.today().strftime("%m/%d/%Y")
+            updates.append({
+                "range": gspread.utils.rowcol_to_a1(r, COL_LAST_CHECKED),
+                "values": [[today]],
             })
 
-            sleep_for = random.uniform(*DELAY_SEC)
-            print(f"   → {status} | sleeping {sleep_for:.1f}s")
-            time.sleep(sleep_for)
-
-        browser.close()
+            # Flush periodically
+            if len(updates) >= 200:
+                ws.batch_update(updates, value_input_option="USER_ENTERED")
+                updates.clear()
+                time.sleep(0.4)
 
     if updates:
-        sheet.batch_update(updates)
-
-    print("✅ Done checking links without touching pre-Removed rows.")
-
+        ws.batch_update(updates, value_input_option="USER_ENTERED")
 
 if __name__ == "__main__":
     main()
