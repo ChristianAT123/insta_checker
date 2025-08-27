@@ -1,4 +1,4 @@
-# check_instagram_links.py  (multi-platform, hardened Facebook detection)
+# check_instagram_links.py  (multi-platform, hardened + no keyfile_name)
 
 import os
 import re
@@ -18,8 +18,8 @@ SHEET_NAME = "Sheet1"
 
 START_ROW = 2
 DELAY_SEC = (4, 7)
-NAV_TIMEOUT_MS = 20000            # give a bit more time on FB
-SETTLE_SLEEP_S = 4                # extra settle time
+NAV_TIMEOUT_MS = 20000            # FB can be slow
+SETTLE_SLEEP_S = 4
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -27,8 +27,6 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Removal phrases (case-sensitive substring checks on HTML).
-# We'll also do case-insensitive locator checks for robustness.
 REMOVAL_TEXT = {
     "instagram": [
         "Sorry, this page isn't available.",
@@ -41,7 +39,6 @@ REMOVAL_TEXT = {
         "Video currently unavailable",
     ],
     "facebook": [
-        # common FB wordings
         "This page isn't available right now",
         "This content isn't available right now",
         "This Video Isn't Available Anymore",
@@ -53,26 +50,39 @@ REMOVAL_TEXT = {
 def get_gspread_client():
     """
     Accept credentials from:
-      - GOOGLE_CREDENTIALS or GOOGLE_CREDENTIALS_JSON (raw JSON)
-      - GOOGLE_APPLICATION_CREDENTIALS (filepath)
+      - GOOGLE_CREDENTIALS or GOOGLE_CREDENTIALS_JSON (raw JSON string, may be base64)
+      - GOOGLE_APPLICATION_CREDENTIALS (path to JSON)
       - fallback to local credentials.json
+    Always parse JSON and use from_json_keyfile_dict (never from_json_keyfile_name).
     """
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds_env = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if creds_env:
-        creds_dict = json.loads(creds_env)
+
+    raw = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if raw:
+        s = raw.strip()
+        if not s.lstrip().startswith("{"):
+            try:
+                import base64
+                s = base64.b64decode(s).decode("utf-8")
+            except Exception:
+                pass
+        creds_dict = json.loads(s)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         return gspread.authorize(creds)
 
     cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     if cred_path and os.path.isfile(cred_path):
-        creds = ServiceAccountCredentials.from_json_keyfile_name(cred_path, scope)
+        with open(cred_path, "r", encoding="utf-8") as f:
+            creds_dict = json.load(f)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         return gspread.authorize(creds)
 
-    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+    with open("credentials.json", "r", encoding="utf-8") as f:
+        creds_dict = json.load(f)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     return gspread.authorize(creds)
 
 
@@ -93,9 +103,7 @@ def detect_platform(url: str) -> str:
 
 
 def looks_like_fb_watch_home(url: str) -> bool:
-    """
-    Treat redirect to /watch/ with no ?v= as 'Removed' for Facebook videos.
-    """
+    """Redirect to /watch/ without v= param counts as Removed."""
     try:
         parsed = urlparse(url)
         if "facebook.com" not in parsed.netloc.lower():
@@ -114,10 +122,7 @@ def contains_any(haystack: str, needles: list[str]) -> bool:
 
 
 def fb_removed_via_locators(page) -> bool:
-    """
-    Extra-robust DOM checks for FB 'removed' states even with login modals.
-    We use case-insensitive regex text locators.
-    """
+    """Detect FB 'removed' banners even with a login modal present."""
     patterns = [
         r"This\s+page\s+isn'?t\s+available\s+right\s+now",
         r"This\s+content\s+isn'?t\s+available\s+right\s+now",
@@ -131,33 +136,24 @@ def fb_removed_via_locators(page) -> bool:
 
 
 def check_one(page, url: str) -> tuple[str, str]:
-    """
-    Navigate and classify.
-    Returns (status, error_details).
-    """
     platform = detect_platform(url)
     try:
-        # FB can be slow; use 'networkidle' to let the login modal / banners render.
         resp = page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="networkidle")
         time.sleep(SETTLE_SLEEP_S)
         code = resp.status if resp else 0
         html = page.content()
         final_url = page.url
 
-        # Facebook special: redirected to /watch/ without v= param
         if platform == "facebook" and looks_like_fb_watch_home(final_url):
             return "Removed", f"Code: {code} (redirected to /watch/)"
 
-        # Phrase checks (raw HTML)
         phrases = REMOVAL_TEXT.get(platform, [])
         if phrases and contains_any(html, phrases):
             return "Removed", f"Code: {code}"
 
-        # Extra robust FB locator checks for banners under modals
         if platform == "facebook" and fb_removed_via_locators(page):
             return "Removed", f"Code: {code} (banner)"
 
-        # Basic success heuristic
         if code and 200 <= code < 400:
             return "Active", f"Code: {code}"
 
@@ -189,7 +185,7 @@ def main():
         page = context.new_page()
 
         for i in range(START_ROW - 1, len(rows)):
-            row_num = i + 1  # 1-based
+            row_num = i + 1
             row = rows[i]
             link = row[0].strip() if len(row) >= 1 else ""
             current_status = row[1].strip().lower() if len(row) >= 2 else ""
@@ -204,7 +200,6 @@ def main():
             print(f"🔍 Checking row {row_num}: {link}")
             status, details = check_one(page, link)
 
-            # B=status, C=removal date, D=last checked, E=error details
             removal_date = today if status == "Removed" else ""
             last_checked = today
 
