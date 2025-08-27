@@ -10,19 +10,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      # Paste your service account either as RAW JSON or BASE64 of the JSON
       GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
       GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS }}
       PYTHONWARNINGS: ignore::DeprecationWarning
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+        # Python runtime
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
+        # Faster pip
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -31,11 +33,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
+        # Install deps (includes playwright==1.44.0 from your requirements.txt)
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+        # Cache Playwright browsers between runs
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -44,28 +48,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-ms-playwright-
 
+        # Install browsers + Linux deps
       - name: Install Playwright browsers
         uses: microsoft/playwright-github-action@v1
         with:
           with-deps: true
 
-      # Robust creds writer: supports RAW or BASE64 secret, validates JSON
+        # Write a valid credentials.json from RAW or BASE64 secret
       - name: Prepare Google credentials
         shell: bash
         run: |
           python - << 'PY'
 import os, json, base64, sys, pathlib
-val = os.getenv("GOOGLE_CREDENTIALS") or ""
-val = val.strip()
+val = (os.getenv("GOOGLE_CREDENTIALS") or "").strip()
 if not val:
-    print("ERROR: GOOGLE_CREDENTIALS secret is empty", file=sys.stderr); sys.exit(1)
-# If it doesn't start with "{", try base64 decode
+    print("ERROR: GOOGLE_CREDENTIALS is empty", file=sys.stderr); sys.exit(1)
 if not val.lstrip().startswith("{"):
     try:
         val = base64.b64decode(val).decode("utf-8")
     except Exception as e:
-        print("ERROR: Secret is not raw JSON and base64 decode failed:", e, file=sys.stderr); sys.exit(1)
-# Validate JSON
+        print("ERROR: Not JSON and base64 decode failed:", e, file=sys.stderr); sys.exit(1)
 try:
     obj = json.loads(val)
 except Exception as e:

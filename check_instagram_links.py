@@ -48,8 +48,8 @@ REMOVAL_TEXT = {
 def get_gspread_client():
     """
     Accept credentials from:
-      - GOOGLE_CREDENTIALS (JSON string)
-      - GOOGLE_CREDENTIALS_JSON (JSON string)
+      - GOOGLE_CREDENTIALS (JSON string; raw or base64)
+      - GOOGLE_CREDENTIALS_JSON (JSON string; raw or base64)
       - GOOGLE_APPLICATION_CREDENTIALS (filepath)
       - fallback to local 'credentials.json' file
     """
@@ -58,12 +58,22 @@ def get_gspread_client():
         "https://www.googleapis.com/auth/drive",
     ]
 
-    # Prefer JSON string envs
+    # Prefer JSON string envs (raw or base64)
     creds_env = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GOOGLE_CREDENTIALS_JSON")
     if creds_env:
-        creds_dict = json.loads(creds_env)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        return gspread.authorize(creds)
+        s = creds_env.strip()
+        if not s.lstrip().startswith("{"):
+            import base64
+            try:
+                s = base64.b64decode(s).decode("utf-8")
+            except Exception:
+                pass
+        try:
+            creds_dict = json.loads(s)
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            return gspread.authorize(creds)
+        except Exception:
+            pass
 
     # Then prefer file path env (created by workflow step)
     cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
@@ -95,14 +105,12 @@ def detect_platform(url: str) -> str:
 
 def looks_like_fb_watch_home(url: str) -> bool:
     """
-    Treat redirect to /watch/ with no ?v= as 'Removed' for Facebook videos,
-    per your note (e.g., https://www.facebook.com/watch/).
+    Treat redirect to /watch/ with no ?v= as 'Removed' for Facebook videos.
     """
     try:
         parsed = urlparse(url)
         if "facebook.com" not in parsed.netloc.lower():
             return False
-        # strictly /watch or /watch/ path
         if re.fullmatch(r"/watch/?", parsed.path):
             qs = parse_qs(parsed.query or "")
             return "v" not in qs or len(qs.get("v", [])) == 0
@@ -119,9 +127,7 @@ def contains_any(haystack: str, needles: list[str]) -> bool:
 def check_one(page, url: str) -> tuple[str, str]:
     """
     Navigate and classify.
-    Returns (status, error_details).
-      status: "Active" | "Removed" | "Unknown"
-      error_details: "Code: NNN" or "Error: ..."
+    Returns (status, error_details): "Active" | "Removed" | "Unknown"
     """
     platform = detect_platform(url)
     try:
@@ -131,20 +137,16 @@ def check_one(page, url: str) -> tuple[str, str]:
         html = page.content()
         final_url = page.url
 
-        # Facebook special: redirected to /watch/ without v= param
         if platform == "facebook" and looks_like_fb_watch_home(final_url):
             return "Removed", f"Code: {code} (redirected to /watch/)"
 
-        # Phrase checks
         phrases = REMOVAL_TEXT.get(platform, [])
         if phrases and contains_any(html, phrases):
             return "Removed", f"Code: {code}"
 
-        # Basic success heuristic: 2xx/3xx & no removal phrase -> Active
         if code and 200 <= code < 400:
             return "Active", f"Code: {code}"
 
-        # Non-success code without explicit phrase -> Unknown
         return "Unknown", f"Code: {code}"
 
     except Exception as e:
