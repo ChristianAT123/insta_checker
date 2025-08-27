@@ -8,23 +8,13 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    container: mcr.microsoft.com/playwright/python:v1.44.0-jammy
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
       - name: Install Python deps
         run: pip install -r requirements.txt
-
-      - name: Install Playwright (deps + Chromium)
-        run: npx -y playwright@1.44.0 install --with-deps chromium
 
       - name: Write Google credentials
         env:
