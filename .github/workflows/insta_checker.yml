@@ -5,7 +5,7 @@ on:
 
 jobs:
   run-checker:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -23,18 +23,14 @@ jobs:
 
       - name: Write Google credentials
         shell: bash
-        run: |
-          echo "${{ secrets.GOOGLE_CREDENTIALS }}" > credentials.json
+        run: echo "${{ secrets.GOOGLE_CREDENTIALS }}" > credentials.json
 
       - name: Inspect credentials.json (debug)
-        run: |
-          wc -c credentials.json
-          python - <<'PY'
-import json, pathlib
-b = pathlib.Path("credentials.json").read_bytes()
-print("first byte:", b[:1])
-print("keys:", sorted(json.loads(b.decode("utf-8")).keys()))
-PY
+        run: >
+          python -c "import json, pathlib;
+          b=pathlib.Path('credentials.json').read_bytes();
+          print('first byte:', b[:1]);
+          print('keys:', sorted(json.loads(b.decode('utf-8')).keys()))"
 
       - name: Assert hardened loader present
         shell: bash
