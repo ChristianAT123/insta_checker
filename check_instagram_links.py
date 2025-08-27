@@ -58,7 +58,7 @@ def get_gspread_client():
         "https://www.googleapis.com/auth/drive",
     ]
 
-    # Prefer JSON string envs (raw or base64)
+    # Prefer env JSON (raw or base64)
     creds_env = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GOOGLE_CREDENTIALS_JSON")
     if creds_env:
         s = creds_env.strip()
@@ -73,18 +73,23 @@ def get_gspread_client():
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             return gspread.authorize(creds)
         except Exception:
-            pass
+            pass  # fall through
 
-    # Then prefer file path env (created by workflow step)
+    # Then GOOGLE_APPLICATION_CREDENTIALS path
     cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if cred_path and os.path.isfile(cred_path):
-        creds = ServiceAccountCredentials.from_json_keyfile_name(cred_path, scope)
-        return gspread.authorize(creds)
+    for path in [cred_path, "credentials.json"]:
+        if path and os.path.isfile(path):
+            try:
+                raw = open(path, "rb").read()
+                # strip BOM/whitespace/newlines to avoid JSONDecodeError
+                raw = raw.lstrip(b"\xef\xbb\xbf\r\n\t ")
+                creds_dict = json.loads(raw.decode("utf-8"))
+                creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+                return gspread.authorize(creds)
+            except Exception:
+                continue
 
-    # Finally, local file fallback
-    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-    return gspread.authorize(creds)
-
+    raise RuntimeError("Could not load Google credentials from env or file.")
 
 def detect_platform(url: str) -> str:
     """Return 'instagram' | 'youtube' | 'tiktok' | 'facebook' | 'unknown'."""
@@ -102,10 +107,10 @@ def detect_platform(url: str) -> str:
         return "facebook"
     return "unknown"
 
-
 def looks_like_fb_watch_home(url: str) -> bool:
     """
-    Treat redirect to /watch/ with no ?v= as 'Removed' for Facebook videos.
+    Treat redirect to /watch/ with no ?v= as 'Removed' for Facebook videos,
+    per your note (e.g., https://www.facebook.com/watch/).
     """
     try:
         parsed = urlparse(url)
@@ -118,16 +123,16 @@ def looks_like_fb_watch_home(url: str) -> bool:
     except Exception:
         return False
 
-
 def contains_any(haystack: str, needles: list[str]) -> bool:
     haystack = haystack or ""
     return any(n in haystack for n in needles)
 
-
 def check_one(page, url: str) -> tuple[str, str]:
     """
     Navigate and classify.
-    Returns (status, error_details): "Active" | "Removed" | "Unknown"
+    Returns (status, error_details).
+      status: "Active" | "Removed" | "Unknown"
+      error_details: "Code: NNN" or "Error: ..."
     """
     platform = detect_platform(url)
     try:
@@ -137,21 +142,24 @@ def check_one(page, url: str) -> tuple[str, str]:
         html = page.content()
         final_url = page.url
 
+        # Facebook special: redirected to /watch/ without v= param
         if platform == "facebook" and looks_like_fb_watch_home(final_url):
             return "Removed", f"Code: {code} (redirected to /watch/)"
 
+        # Phrase checks
         phrases = REMOVAL_TEXT.get(platform, [])
         if phrases and contains_any(html, phrases):
             return "Removed", f"Code: {code}"
 
+        # Basic success heuristic: 2xx/3xx & no removal phrase -> Active
         if code and 200 <= code < 400:
             return "Active", f"Code: {code}"
 
+        # Non-success code without explicit phrase -> Unknown
         return "Unknown", f"Code: {code}"
 
     except Exception as e:
         return "Unknown", f"Error: {e}"
-
 
 # ========= MAIN =========
 def main():
@@ -206,7 +214,6 @@ def main():
         sheet.batch_update(updates)
 
     print("✅ Done checking links without touching pre-Removed rows.")
-
 
 if __name__ == "__main__":
     main()

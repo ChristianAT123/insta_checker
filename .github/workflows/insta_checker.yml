@@ -10,8 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS || secrets.GOOGLE_CREDENTIALS_JSON }}
-      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS || secrets.GOOGLE_CREDENTIALS_JSON }}
+      # Use whichever secret you set; if you only have GOOGLE_CREDENTIALS, that's fine.
+      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
       PYTHONWARNINGS: ignore::DeprecationWarning
 
     steps:
@@ -55,11 +56,7 @@ jobs:
       - name: Inspect credentials.json (debug)
         run: |
           wc -c credentials.json
-          python - <<'PY'
-with open("credentials.json","rb") as f:
-    b=f.read()
-print("first byte:", b[:1])
-PY
+          python -c 'b=open("credentials.json","rb").read(); print("first byte:", b[:1])'
 
       - name: Run script
         run: python check_instagram_links.py
