@@ -1,31 +1,38 @@
-name: primary Logs sheet + daily @10pm ET
+name: Insta Checker
 
 on:
+  schedule:
+    # ~10:00 PM US/Eastern (03:00 UTC)
+    - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       shard_index:
-        description: "Shard index (0-based)"
-        required: true
+        description: "Shard index (0-based) for manual run"
+        required: false
         default: "0"
       total_shards:
-        description: "Total shards"
-        required: true
+        description: "Total shards for manual run"
+        required: false
         default: "1"
       skip_recent_days:
-        description: "Skip rows with Last Checked < N days old"
-        required: true
+        description: "Skip rows whose 'Last checked' is within N days (0=off)"
+        required: false
         default: "0"
-  schedule:
-    # 10:00 PM US/Eastern == 02:00 UTC next day during EDT, 03:00 UTC during EST
-    - cron: "0 3 * * *"
 
 jobs:
-  linkcheck:
-    runs-on: ubuntu-latest
+  nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7]   # 8-way parallel shards
     env:
-      PYTHONUNBUFFERED: "1"
+      SHARD_INDEX: ${{ matrix.shard }}
+      TOTAL_SHARDS: 8
+      SKIP_RECENT_DAYS: 0
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -33,66 +40,91 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install Python deps
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Install Playwright browsers (chromium only)
-        run: |
+          # Ensure modern Playwright on Ubuntu 22.04/24.04
+          pip install --upgrade "playwright>=1.47.1"
           playwright install --with-deps chromium
 
       - name: Write Google credentials
-        shell: python
+        shell: bash
         env:
-          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          RAW_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          B64_JSON: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
         run: |
-          import os, sys, json, base64, pathlib
-          raw = (os.environ.get("GOOGLE_CREDENTIALS_JSON") or "").strip()
-          if not raw:
-            print("ERROR: GOOGLE_CREDENTIALS_JSON secret is empty.", file=sys.stderr)
-            sys.exit(1)
-          # accept raw JSON or base64-encoded JSON
-          try:
-            decoded = base64.b64decode(raw).decode("utf-8")
-            obj = json.loads(decoded)
-            raw = decoded
-          except Exception:
-            # not b64 – assume plain JSON
-            obj = json.loads(raw)
-          pathlib.Path("credentials.json").write_text(raw, encoding="utf-8")
-          print("Wrote credentials.json OK")
+          set -euo pipefail
+          if [[ -n "${B64_JSON:-}" ]]; then
+            printf '%s' "$B64_JSON" | base64 -d > credentials.json
+          else
+            printf '%s' "${RAW_JSON:-}" > credentials.json
+          fi
+          test -s credentials.json
 
-      - name: Assert hardened loader present
+      - name: Refuse deprecated keyfile loader
         shell: bash
         run: |
-          if grep -n "from_json_keyfile_name" check_instagram_links.py; then
+          if grep -nE 'from_json_keyfile_name[[:space:]]*\(' check_instagram_links.py; then
             echo "ERROR: old keyfile_name loader found; refusing to run."
             exit 1
           fi
 
-      - name: Count current URLs in Logs!F
-        id: count
-        shell: python
-        run: |
-          import json, gspread, pathlib
-          from oauth2client.service_account import ServiceAccountCredentials as S
-
-          SHEET_ID = "1fFTIEDy-86lDaCgll1GkTq376hvrTd-DXulioXrDAgw"
-          TAB = "Logs"
-          URL_COL_INDEX_1BASED = 6  # F
-
-          scope=["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
-          creds = S.from_json_keyfile_dict(json.loads(pathlib.Path("credentials.json").read_text("utf-8")), scope)
-          gc = gspread.authorize(creds)
-          ws = gc.open_by_key(SHEET_ID).worksheet(TAB)
-          col = ws.col_values(URL_COL_INDEX_1BASED)
-          total = sum(1 for v in col[1:] if (v or "").strip())
-          print(f"total={total}")
-
-      - name: Run script
+      - name: Run checker (nightly shards)
         env:
-          SHARD_INDEX: ${{ github.event.inputs.shard_index || 0 }}
-          TOTAL_SHARDS: ${{ github.event.inputs.total_shards || 1 }}
-          SKIP_RECENT_DAYS: ${{ github.event.inputs.skip_recent_days || 0 }}
+          SHARD_INDEX: ${{ env.SHARD_INDEX }}
+          TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
+          SKIP_RECENT_DAYS: ${{ env.SKIP_RECENT_DAYS }}
+        run: python -u check_instagram_links.py
+
+  manual:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    env:
+      SHARD_INDEX: ${{ github.event.inputs.shard_index || 0 }}
+      TOTAL_SHARDS: ${{ github.event.inputs.total_shards || 1 }}
+      SKIP_RECENT_DAYS: ${{ github.event.inputs.skip_recent_days || 0 }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install --upgrade "playwright>=1.47.1"
+          playwright install --with-deps chromium
+
+      - name: Write Google credentials
+        shell: bash
+        env:
+          RAW_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          B64_JSON: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${B64_JSON:-}" ]]; then
+            printf '%s' "$B64_JSON" | base64 -d > credentials.json
+          else
+            printf '%s' "${RAW_JSON:-}" > credentials.json
+          fi
+          test -s credentials.json
+
+      - name: Refuse deprecated keyfile loader
+        shell: bash
+        run: |
+          if grep -nE 'from_json_keyfile_name[[:space:]]*\(' check_instagram_links.py; then
+            echo "ERROR: old keyfile_name loader found; refusing to run."
+            exit 1
+          fi
+
+      - name: Run checker (manual)
+        env:
+          SHARD_INDEX: ${{ env.SHARD_INDEX }}
+          TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
+          SKIP_RECENT_DAYS: ${{ env.SKIP_RECENT_DAYS }}
         run: python -u check_instagram_links.py
