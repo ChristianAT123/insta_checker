@@ -9,7 +9,6 @@ jobs:
   run:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -24,12 +23,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Install Playwright browsers for the Python package (chromium + deps)
       - name: Install Playwright browsers (python)
         run: |
           python -m playwright install --with-deps chromium
 
-      # Write service account JSON from secret into credentials.json
       - name: Write Google credentials
         shell: bash
         env:
@@ -38,22 +35,14 @@ jobs:
           if [ -z "${GOOGLE_CREDENTIALS}" ]; then
             echo "ERROR: GOOGLE_CREDENTIALS secret is empty"; exit 1
           fi
-          # Avoid trailing newline issues; write bytes exactly
           printf "%s" "${GOOGLE_CREDENTIALS}" > credentials.json
 
-      # Small sanity check that the JSON is present and valid
       - name: Inspect credentials.json (debug)
         shell: bash
         run: |
           wc -c credentials.json
-          python - <<'PY'
-            import json, pathlib
-            b = pathlib.Path("credentials.json").read_bytes()
-            print("first byte:", b[:1])
-            print("keys:", sorted(json.loads(b.decode("utf-8")).keys()))
-PY
+          python -c "import json, pathlib; b=pathlib.Path('credentials.json').read_bytes(); print('first byte:', b[:1]); print('keys:', sorted(json.loads(b.decode('utf-8')).keys()))"
 
-      # Ensure we are NOT using the deprecated keyfile loader in the script
       - name: Assert hardened loader present
         shell: bash
         run: |
@@ -63,6 +52,5 @@ PY
           fi
           sed -n '1,40p' check_instagram_links.py
 
-      # Run unbuffered so logs stream live in Actions
       - name: Run script (live logs)
         run: python -u check_instagram_links.py
