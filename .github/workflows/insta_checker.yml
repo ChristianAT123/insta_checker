@@ -1,56 +1,48 @@
-name: Instagram DMCA Link Checker
+name: Insta Checker
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 12 * * *"
 
 jobs:
-  run:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
+  run-checker:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Install Playwright browsers (python)
-        run: |
-          python -m playwright install --with-deps chromium
+          playwright install --with-deps
 
       - name: Write Google credentials
         shell: bash
-        env:
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: |
-          if [ -z "${GOOGLE_CREDENTIALS}" ]; then
-            echo "ERROR: GOOGLE_CREDENTIALS secret is empty"; exit 1
-          fi
-          printf "%s" "${GOOGLE_CREDENTIALS}" > credentials.json
+          echo "${{ secrets.GOOGLE_CREDENTIALS }}" > credentials.json
 
       - name: Inspect credentials.json (debug)
-        shell: bash
         run: |
           wc -c credentials.json
-          python -c "import json, pathlib; b=pathlib.Path('credentials.json').read_bytes(); print('first byte:', b[:1]); print('keys:', sorted(json.loads(b.decode('utf-8')).keys()))"
+          python - <<'PY'
+import json, pathlib
+b = pathlib.Path("credentials.json").read_bytes()
+print("first byte:", b[:1])
+print("keys:", sorted(json.loads(b.decode("utf-8")).keys()))
+PY
 
       - name: Assert hardened loader present
         shell: bash
         run: |
-          if grep -n "from_json_keyfile_name" check_instagram_links.py; then
+          if grep -nE 'from_json_keyfile_name[[:space:]]*\(' check_instagram_links.py; then
             echo "ERROR: old keyfile_name loader found; refusing to run."
             exit 1
           fi
-          sed -n '1,40p' check_instagram_links.py
 
-      - name: Run script (live logs)
+      - name: Run script
         run: python -u check_instagram_links.py
