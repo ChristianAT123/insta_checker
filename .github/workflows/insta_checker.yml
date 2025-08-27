@@ -1,32 +1,40 @@
-name: Link check (Logs sheet)
+name: Link check (Primary Logs sheet)
 
 on:
+  # 10pm US/Eastern = 02:00 UTC (handles both EST/EDT the same from GitHub's POV)
+  schedule:
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       shard_index:
         description: "Shard index (0-based)"
-        default: "0"
         required: true
+        default: "0"
       total_shards:
         description: "Total shards"
+        required: true
         default: "1"
-        required: true
       skip_recent_days:
-        description: "Skip rows with last-checked newer than N days"
-        default: "0"
+        description: "Skip rows with Last-Checked newer than N days (0=disable)"
         required: true
-  schedule:
-    # 03:00 UTC == 10:00 PM EST (standard time)
-    - cron: "0 3 * * *"
+        default: "0"
 
 jobs:
   linkcheck:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
+      # Primary sheet + tab
+      SHEET_ID: 1fFTIEDy-86lDaCgll1GkTq376hvrTd-DXulioXrDAgw
+      SHEET_TAB: Logs
+      # Column indices (1-based): F=6, M=13, N=14, O=15
+      URL_COL_INDEX: "6"
+      STATUS_COL_INDEX: "13"
+      REMOVAL_DATE_COL_INDEX: "14"
+      LAST_CHECKED_COL_INDEX: "15"
       PYTHONUNBUFFERED: "1"
 
     steps:
-      - name: Checkout
+      - name: Check out
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -34,10 +42,11 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install deps
+      - name: Install deps (pip + Playwright Chromium)
         run: |
-          python -m pip install -U pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install playwright gspread oauth2client
           playwright install --with-deps chromium
 
       - name: Write Google credentials
@@ -46,63 +55,70 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
         run: |
           python - <<'PY'
-import os, base64, sys
-raw = os.environ.get("GOOGLE_CREDENTIALS_JSON","").strip()
-if not raw:
-    print("ERROR: GOOGLE_CREDENTIALS_JSON secret is empty.", file=sys.stderr)
-    sys.exit(1)
-try:
-    data = raw.encode("utf-8") if raw.lstrip().startswith("{") else base64.b64decode(raw)
-    open("credentials.json","wb").write(data)
-    print("credentials.json written:", len(data), "bytes")
-except Exception as e:
-    print("ERROR writing credentials.json:", e, file=sys.stderr)
-    sys.exit(1)
-PY
+          import os, base64, sys, json, pathlib
+          raw = os.environ.get("GOOGLE_CREDENTIALS_JSON","").strip()
+          if not raw:
+              print("ERROR: GOOGLE_CREDENTIALS_JSON secret is empty.", file=sys.stderr)
+              sys.exit(1)
+          try:
+              # Accept either raw JSON or base64-encoded JSON
+              data = raw.encode("utf-8") if raw.lstrip().startswith("{") else base64.b64decode(raw)
+              # Quick sanity check it is JSON
+              _ = json.loads(data.decode("utf-8"))
+              pathlib.Path("credentials.json").write_bytes(data)
+              print("credentials.json written:", len(data), "bytes")
+          except Exception as e:
+              print("ERROR writing credentials.json:", e, file=sys.stderr)
+              sys.exit(1)
+          PY
 
       - name: Inspect credentials.json (debug)
         run: |
           wc -c credentials.json
           python - <<'PY'
-import json, pathlib
-b = pathlib.Path("credentials.json").read_bytes()
-print("first byte:", b[:1])
-try:
-    print("keys:", sorted(json.loads(b.decode("utf-8")).keys()))
-except Exception as e:
-    print("json error:", e)
-PY
+          import json, pathlib
+          b = pathlib.Path("credentials.json").read_bytes()
+          print("first byte:", b[:1])
+          print("keys:", sorted(json.loads(b.decode("utf-8")).keys()))
+          PY
 
+      # Refuse to run if the deprecated loader is still used
+      - name: Assert hardened loader present
+        shell: bash
+        run: |
+          if grep -n "from_json_keyfile_name" check_instagram_links.py; then
+            echo "ERROR: old keyfile_name loader found; refusing to run."
+            exit 1
+          fi
+          sed -n '1,120p' check_instagram_links.py
+
+      # Quick count of URLs in Logs!F to confirm access & show total rows
       - name: Count current URLs in Logs!F
         id: count
         run: |
           TOTAL=$(python - <<'PY'
-import json, gspread
-from oauth2client.service_account import ServiceAccountCredentials
-
-SHEET_ID = "1fFTIEDy-86lDaCgll1GkTq376hvrTd-DXulioXrDAgw"
-TAB = "Logs"
-URL_COL = 6  # Column F
-
-scope = [
-  "https://spreadsheets.google.com/feeds",
-  "https://www.googleapis.com/auth/drive",
-]
-with open("credentials.json","r",encoding="utf-8") as f:
-    creds_dict = json.load(f)
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-gc = gspread.authorize(creds)
-
-ws = gc.open_by_key(SHEET_ID).worksheet(TAB)
-col = ws.col_values(URL_COL)
-print(sum(1 for v in col[1:] if (v or "").strip()))
-PY
+          import json, gspread
+          from oauth2client.service_account import ServiceAccountCredentials as S
+          import os
+          scope = [
+              "https://spreadsheets.google.com/feeds",
+              "https://www.googleapis.com/auth/drive",
+          ]
+          with open("credentials.json","r",encoding="utf-8") as f:
+              creds_dict = json.load(f)
+          gc = gspread.authorize(S.from_json_keyfile_dict(creds_dict, scope))
+          ws = gc.open_by_key(os.environ["SHEET_ID"]).worksheet(os.environ["SHEET_TAB"])
+          col = ws.col_values(int(os.environ["URL_COL_INDEX"]))
+          print(sum(1 for v in col[1:] if (v or "").strip()))
+          PY
           )
-          echo "total=$TOTAL" | tee -a "$GITHUB_OUTPUT"
+          echo "total=${TOTAL}" | tee -a "$GITHUB_OUTPUT"
 
       - name: Run script
-        run: python -u check_instagram_links.py
         env:
           SHARD_INDEX: ${{ github.event.inputs.shard_index || 0 }}
           TOTAL_SHARDS: ${{ github.event.inputs.total_shards || 1 }}
           SKIP_RECENT_DAYS: ${{ github.event.inputs.skip_recent_days || 0 }}
+        run: |
+          echo "Shard $SHARD_INDEX / $TOTAL_SHARDS; Skip recent: $SKIP_RECENT_DAYS day(s)"
+          python -u check_instagram_links.py
