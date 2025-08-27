@@ -1,4 +1,4 @@
-name: Instagram DMCA Link Checker
+name: Insta Link Checker
 
 on:
   workflow_dispatch:
@@ -6,14 +6,8 @@ on:
     - cron: "0 12 * * *"
 
 jobs:
-  run:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    env:
-      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-      PYTHONWARNINGS: ignore::DeprecationWarning
-
+  run-checker:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -23,23 +17,26 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          playwright install --with-deps chromium
 
-      # Force-install Playwright Chromium for the PYTHON Playwright package
-      - name: Install Playwright browsers (python)
+      - name: Write Google credentials
+        shell: bash
         run: |
-          python -m playwright install --with-deps chromium
-
-      - name: Prepare Google credentials (raw JSON or base64)
-        run: python scripts/prepare_google_creds.py
+          echo "$GOOGLE_CREDENTIALS" > credentials.json
 
       - name: Inspect credentials.json (debug)
         run: |
           wc -c credentials.json
-          python -c 'b=open("credentials.json","rb").read(); print("first byte:", b[:1])'
+          python - <<'PY'
+import sys, json
+b=open("credentials.json","rb").read()
+print("first byte:", b[:1])
+print("keys:", sorted(json.loads(b.decode("utf-8")).keys()))
+PY
 
       - name: Assert hardened loader present
         run: |
@@ -50,4 +47,4 @@ jobs:
           sed -n '1,40p' check_instagram_links.py
 
       - name: Run script
-        run: python check_instagram_links.py
+        run: python -u check_instagram_links.py
