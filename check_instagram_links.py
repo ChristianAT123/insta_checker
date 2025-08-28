@@ -11,7 +11,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 # ==== CONFIG: Primary sheet ====
-SHEET_ID = "1fFTIEDy-86lDaCgll1GkTq376hvrTd-DXulioXrDAgw"
+SHEET_ID = "1sPsWqoEqd1YmD752fuz7j1K3VSGggpzlkc_Tp7Pr4jQ"
 TAB = "Logs"
 
 # Columns are 1-based indexes
@@ -62,10 +62,10 @@ THREADS_UNAVAILABLE_BADGE = "post unavailable"
 
 # Login-wall fingerprints (kept conservative)
 LOGIN_CUES = [
-    "log in",           # generic
-    "sign up",          # generic
-    "/accounts/login",  # instagram
-    "login.facebook",   # facebook variants
+    "log in",
+    "sign up",
+    "/accounts/login",
+    "login.facebook",
     "log in to facebook",
 ]
 
@@ -168,15 +168,12 @@ def check_instagram(page, url: str) -> str:
     body = page_text(page)
     cur_url = page.url
 
-    # Positive removal text
     if contains_any(body, [p.lower() for p in INST_REMOVAL_PHRASES]):
         return "removed"
 
-    # Login wall without removal content -> Active per request
     if looks_like_login(body, cur_url):
         return "active"
 
-    # Active signals (visible media containers or OG tags)
     try:
         if page.query_selector("article, video, div[role='dialog']"):
             return "active"
@@ -231,7 +228,6 @@ def check_facebook(page, url: str) -> str:
     if contains_any(body, [x.lower() for x in FB_REMOVAL]):
         return "removed"
 
-    # Login wall without clear removal -> Active per request
     if looks_like_login(body, cur_url):
         return "active"
 
@@ -278,7 +274,6 @@ def check_one(page, url: str) -> str:
     if p == "threads":
         return check_threads(page, url)
 
-    # Fallback
     try:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         code = resp.status if resp else 0
