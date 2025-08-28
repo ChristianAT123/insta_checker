@@ -1,25 +1,34 @@
-# check_instagram_links.py  (multi-platform)
-
 import os
 import re
 import json
 import time
 import random
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 from datetime import datetime
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ========= CONFIG =========
-SPREADSHEET_ID = "1ps5Luzxgk0nNGWqTPCw9y9MhgCCnoAuKpZ73UmlanPE"
-SHEET_NAME = "Sheet1"
+# ==== CONFIG: Primary sheet ====
+SHEET_ID = "1fFTIEDy-86lDaCgll1GkTq376hvrTd-DXulioXrDAgw"
+TAB = "Logs"
 
-START_ROW = 2                  # first data row (A2...)
-DELAY_SEC = (4, 7)             # polite delay between checks
-NAV_TIMEOUT_MS = 15000         # Playwright navigation timeout
-SETTLE_SLEEP_S = 3             # extra settle time
+# Columns are 1-based indexes
+URL_COL = 6            # F: Infringing URL
+STATUS_COL = 13        # M: Status
+REMOVAL_DATE_COL = 14  # N: Removal Date
+LAST_CHECKED_COL = 15  # O: Last Checked
+
+# Behavior
+START_ROW = 2
+SKIP_STATUS_VALUES = {"removed"}      # we re-check Unknown and Login Required and Active
+DELAY_RANGE = (4.0, 7.0)
+
+# Browser timing
+NAV_TIMEOUT_MS = 15000
+NETWORK_IDLE_MS = 7000
+SETTLE_SLEEP_S = 2.0
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -27,43 +36,87 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Removal text by platform
-REMOVAL_TEXT = {
-    "instagram": [
-        "Sorry, this page isn't available.",
-    ],
-    "youtube": [
-        "This video isn't available anymore",
-        "Video unavailable",
-    ],
-    "tiktok": [
-        "Video currently unavailable",
-    ],
-    "facebook": [
-        "This content isn't available right now",
-    ],
-}
+# --- Text fingerprints (lowercased when compared) ---
+INST_REMOVAL_PHRASES = [
+    "sorry, this page isn't available",
+    "the link you followed may be broken",
+    "page not found",
+]
 
-# ========= HELPERS =========
-def get_gspread_client():
-    """Use env secret if present (Actions), else local credentials.json."""
+YT_REMOVAL = [
+    "video unavailable",
+    "this video isn't available anymore",
+]
+
+TT_REMOVAL = [
+    "video currently unavailable",
+]
+
+FB_REMOVAL = [
+    "this content isn't available right now",
+]
+
+# Threads: removed posts redirect to this
+THREADS_REMOVED_URL_FRAGMENT = "threads.com/?error=invalid_post"
+THREADS_UNAVAILABLE_BADGE = "post unavailable"
+
+# Login-wall fingerprints (kept conservative)
+LOGIN_CUES = [
+    "log in",           # generic
+    "sign up",          # generic
+    "/accounts/login",  # instagram
+    "login.facebook",   # facebook variants
+    "log in to facebook",
+]
+
+# ----------------- Sheets auth -----------------
+def make_gspread_client():
+    """Load service-account creds from env (raw/base64) or credentials.json."""
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds_env = os.getenv("GOOGLE_CREDENTIALS")
-    if creds_env:
-        creds_dict = json.loads(creds_env)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    else:
-        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-    return gspread.authorize(creds)
 
+    env_val = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if env_val:
+        s = env_val.strip()
+        if not s.lstrip().startswith("{"):
+            import base64
+            try:
+                s = base64.b64decode(s).decode("utf-8")
+            except Exception:
+                pass
+        try:
+            creds_dict = json.loads(s)
+            return gspread.authorize(
+                ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            )
+        except Exception:
+            pass  # fall through
 
-def detect_platform(url: str) -> str:
-    """Return 'instagram' | 'youtube' | 'tiktok' | 'facebook' | 'unknown'."""
+    for path in [os.getenv("GOOGLE_APPLICATION_CREDENTIALS"), "credentials.json"]:
+        if path and os.path.isfile(path):
+            raw = open(path, "rb").read().lstrip(b"\xef\xbb\xbf\r\n\t ")
+            creds_dict = json.loads(raw.decode("utf-8"))
+            return gspread.authorize(
+                ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            )
+
+    raise RuntimeError("Could not load Google credentials from env or credentials.json")
+
+# ----------------- Helpers -----------------
+def normalize_url(u: str) -> str:
+    return (u or "").strip()
+
+def page_text(page) -> str:
     try:
-        host = urlparse(url).netloc.lower()
+        return (page.content() or "").lower()
+    except Exception:
+        return ""
+
+def host_platform(u: str) -> str:
+    try:
+        host = urlparse(u).netloc.lower()
     except Exception:
         return "unknown"
     if "instagram.com" in host:
@@ -74,121 +127,223 @@ def detect_platform(url: str) -> str:
         return "tiktok"
     if "facebook.com" in host or "fb.watch" in host:
         return "facebook"
+    if "threads.net" in host or "threads.com" in host:
+        return "threads"
     return "unknown"
 
-
-def looks_like_fb_watch_home(url: str) -> bool:
-    """
-    Treat redirect to /watch/ with no ?v= as 'Removed' for Facebook videos,
-    per your note (e.g., https://www.facebook.com/watch/).
-    """
-    try:
-        parsed = urlparse(url)
-        if "facebook.com" not in parsed.netloc.lower():
-            return False
-        # strictly /watch or /watch/ path
-        if re.fullmatch(r"/watch/?", parsed.path):
-            qs = parse_qs(parsed.query or "")
-            return "v" not in qs or len(qs.get("v", [])) == 0
-        return False
-    except Exception:
-        return False
-
-
-def contains_any(haystack: str, needles: list[str]) -> bool:
-    haystack = haystack or ""
+def contains_any(haystack: str, needles) -> bool:
     return any(n in haystack for n in needles)
 
+def looks_like_login(body: str, url_now: str) -> bool:
+    return ("/accounts/login" in url_now) or contains_any(body, LOGIN_CUES)
 
-def check_one(page, url: str) -> tuple[str, str]:
+# ----------------- Per-platform checkers -----------------
+def check_instagram(page, url: str) -> str:
     """
-    Navigate and classify.
-    Returns (status, error_details).
-      status: "Active" | "Removed" | "Unknown"
-      error_details: "Code: NNN" or "Error: ..."
+    IG:
+      - REMOVED if we see IG's removal text (or very clear failure).
+      - LOGIN_REQUIRED if we hit the login wall without removal text.
+      - ACTIVE if we can see post containers (article/video/og tags).
+      - otherwise UNKNOWN.
     """
-    platform = detect_platform(url)
+    page.set_default_navigation_timeout(NAV_TIMEOUT_MS)
+    page.set_default_timeout(NAV_TIMEOUT_MS)
+
     try:
-        resp = page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="domcontentloaded")
-        time.sleep(SETTLE_SLEEP_S)
+        resp = page.goto(url, wait_until="domcontentloaded")
+    except PWTimeout:
+        try:
+            resp = page.goto(url, wait_until="networkidle")
+        except Exception:
+            return "unknown"
+    except Exception:
+        return "unknown"
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
+    except Exception:
+        pass
+    time.sleep(SETTLE_SLEEP_S)
+
+    body = page_text(page)
+    cur_url = page.url
+
+    # Positive removal text
+    if contains_any(body, [p.lower() for p in INST_REMOVAL_PHRASES]):
+        return "removed"
+
+    # Login wall without removal content
+    if looks_like_login(body, cur_url):
+        return "login required"
+
+    # Active signals (visible media containers or OG tags)
+    try:
+        if page.query_selector("article, video, div[role='dialog']"):
+            return "active"
+        if page.query_selector('meta[property="og:video"], meta[property="og:image"]'):
+            return "active"
+    except Exception:
+        pass
+
+    return "unknown"
+
+def check_youtube(page, url: str) -> str:
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception:
+        return "unknown"
+    body = page_text(page)
+    if contains_any(body, [x.lower() for x in YT_REMOVAL]):
+        return "removed"
+    code = resp.status if resp else 0
+    if code and 200 <= code < 400:
+        return "active"
+    return "unknown"
+
+def check_tiktok(page, url: str) -> str:
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception:
+        return "unknown"
+    body = page_text(page)
+    if contains_any(body, [x.lower() for x in TT_REMOVAL]):
+        return "removed"
+    code = resp.status if resp else 0
+    if code and 200 <= code < 400:
+        return "active"
+    return "unknown"
+
+def check_facebook(page, url: str) -> str:
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception:
+        return "unknown"
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
+    except Exception:
+        pass
+    time.sleep(SETTLE_SLEEP_S)
+
+    body = page_text(page)
+    cur_url = page.url.lower()
+
+    if contains_any(body, [x.lower() for x in FB_REMOVAL]):
+        return "removed"
+
+    # If it looks like a login wall (no clear removal)
+    if looks_like_login(body, cur_url):
+        return "login required"
+
+    code = resp.status if resp else 0
+    if code and 200 <= code < 400:
+        return "active"
+    return "unknown"
+
+def check_threads(page, url: str) -> str:
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception:
+        return "unknown"
+
+    final_url = page.url.lower()
+    if "error=invalid_post" in final_url:
+        return "removed"
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
+    except Exception:
+        pass
+    time.sleep(SETTLE_SLEEP_S)
+
+    body = page_text(page)
+    if THREADS_UNAVAILABLE_BADGE in body:
+        return "removed"
+
+    code = resp.status if resp else 0
+    if code and 200 <= code < 400:
+        return "active"
+    return "unknown"
+
+def check_one(page, url: str) -> str:
+    p = host_platform(url)
+    if p == "instagram":
+        return check_instagram(page, url)
+    if p == "youtube":
+        return check_youtube(page, url)
+    if p == "tiktok":
+        return check_tiktok(page, url)
+    if p == "facebook":
+        return check_facebook(page, url)
+    if p == "threads":
+        return check_threads(page, url)
+
+    # Fallback
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         code = resp.status if resp else 0
-        html = page.content()
-        final_url = page.url
+        return "active" if code and 200 <= code < 400 else "unknown"
+    except Exception:
+        return "unknown"
 
-        # Facebook special: redirected to /watch/ without v= param
-        if platform == "facebook" and looks_like_fb_watch_home(final_url):
-            return "Removed", f"Code: {code} (redirected to /watch/)"
-
-        # Phrase checks
-        phrases = REMOVAL_TEXT.get(platform, [])
-        if phrases and contains_any(html, phrases):
-            return "Removed", f"Code: {code}"
-
-        # Basic success heuristic: 2xx/3xx & no removal phrase -> Active
-        if code and 200 <= code < 400:
-            return "Active", f"Code: {code}"
-
-        # Non-success code without explicit phrase -> Unknown
-        return "Unknown", f"Code: {code}"
-
-    except Exception as e:
-        return "Unknown", f"Error: {e}"
-
-
-# ========= MAIN =========
+# ----------------- Main -----------------
 def main():
-    client = get_gspread_client()
-    sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+    gc = make_gspread_client()
+    ws = gc.open_by_key(SHEET_ID).worksheet(TAB)
 
-    rows = sheet.get_all_values()
-    if not rows:
-        print("No data in sheet.")
+    values = ws.get_all_values()
+    if not values:
+        print("No data.")
         return
 
-    updates = []
     today = datetime.now().strftime("%m/%d/%Y")
+    updates = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=USER_AGENT)
         page = context.new_page()
 
-        for i in range(START_ROW - 1, len(rows)):
-            row_num = i + 1  # 1-based
-            row = rows[i]
-            link = row[0].strip() if len(row) >= 1 else ""
-            current_status = row[1].strip().lower() if len(row) >= 2 else ""
+        for i in range(START_ROW - 1, len(values)):
+            row_idx = i + 1  # 1-based
+            row = values[i]
+            url = normalize_url(row[URL_COL - 1] if len(row) >= URL_COL else "")
+            status_now = (row[STATUS_COL - 1] if len(row) >= STATUS_COL else "").strip().lower()
 
-            if not link:
-                print(f"⏭️  Skipping row {row_num} (no URL)")
+            if not url:
                 continue
-            if current_status == "removed":
-                print(f"⏭️  Skipping row {row_num} (status: 'removed')")
+            if status_now in SKIP_STATUS_VALUES:
+                print(f"⏭️  Skipping row {row_idx} (status: '{status_now}')")
                 continue
 
-            print(f"🔍 Checking row {row_num}: {link}")
-            status, details = check_one(page, link)
+            print(f"🔎 Checking row {row_idx}: {url}")
+            result = check_one(page, url)
 
-            # For sheet: B=status, C=removal date, D=last checked, E=error details
-            removal_date = today if status == "Removed" else ""
+            removal_date = today if result == "removed" else ""
             last_checked = today
 
             updates.append({
-                "range": f"B{row_num}:E{row_num}",
-                "values": [[status, removal_date, last_checked, details]],
+                "range": f"{col_letter(STATUS_COL)}{row_idx}:{col_letter(LAST_CHECKED_COL)}{row_idx}",
+                "values": [[result.title(), removal_date, last_checked]],
             })
 
-            sleep_for = random.uniform(*DELAY_SEC)
-            print(f"   → {status} | sleeping {sleep_for:.1f}s")
+            sleep_for = random.uniform(*DELAY_RANGE)
+            print(f"   → {result} | sleeping {sleep_for:.1f}s")
             time.sleep(sleep_for)
 
         browser.close()
 
     if updates:
-        sheet.batch_update(updates)
+        ws.batch_update(updates)
+    print("✅ Done.")
 
-    print("✅ Done checking links without touching pre-Removed rows.")
-
+# Utility: 1-based column index → letters (13 → 'M')
+def col_letter(n: int) -> str:
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
 
 if __name__ == "__main__":
     main()
