@@ -2,18 +2,17 @@ name: Insta Checker
 
 on:
   schedule:
-    # ~10:00 PM US/Eastern (03:00 UTC)
     - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       shard_index:
-        description: "Shard index (0-based) for manual run"
+        description: "IGNORE for parallel manual run"
         required: false
         default: "0"
       total_shards:
-        description: "Total shards for manual run"
+        description: "Total shards for manual run (e.g. 8)"
         required: false
-        default: "1"
+        default: "8"
       skip_recent_days:
         description: "Skip rows whose 'Last checked' is within N days (0=off)"
         required: false
@@ -26,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0,1,2,3,4,5,6,7]   # 8-way parallel shards
+        shard: [0,1,2,3,4,5,6,7]
     env:
       SHARD_INDEX: ${{ matrix.shard }}
       TOTAL_SHARDS: 8
@@ -34,20 +33,16 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # Ensure modern Playwright on Ubuntu 22.04/24.04
           pip install --upgrade "playwright>=1.47.1"
           playwright install --with-deps chromium
-
       - name: Write Google credentials
         shell: bash
         env:
@@ -61,7 +56,6 @@ jobs:
             printf '%s' "${RAW_JSON:-}" > credentials.json
           fi
           test -s credentials.json
-
       - name: Refuse deprecated keyfile loader
         shell: bash
         run: |
@@ -69,7 +63,6 @@ jobs:
             echo "ERROR: old keyfile_name loader found; refusing to run."
             exit 1
           fi
-
       - name: Run checker (nightly shards)
         env:
           SHARD_INDEX: ${{ env.SHARD_INDEX }}
@@ -77,29 +70,48 @@ jobs:
           SKIP_RECENT_DAYS: ${{ env.SKIP_RECENT_DAYS }}
         run: python -u check_instagram_links.py
 
-  manual:
+  # --- NEW: build a dynamic matrix for manual runs ---
+  prepare-manual:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total:  ${{ steps.gen.outputs.total }}
+      skip:   ${{ steps.gen.outputs.skip }}
+    steps:
+      - id: gen
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOTAL="${{ github.event.inputs.total_shards || '1' }}"
+          SKIP="${{ github.event.inputs.skip_recent_days || '0' }}"
+          if ! [[ "$TOTAL" =~ ^[0-9]+$ && "$TOTAL" -ge 1 ]]; then TOTAL=1; fi
+          seq 0 $((TOTAL-1)) | paste -sd, - | awk -v t="$TOTAL" -v s="$SKIP" '{print "matrix={\"shard\":[" $0 "]}\ntotal=" t "\nskip=" s}' >> "$GITHUB_OUTPUT"
+
+  manual:
+    if: github.event_name == 'workflow_dispatch'
+    needs: prepare-manual
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare-manual.outputs.matrix) }}
     env:
-      SHARD_INDEX: ${{ github.event.inputs.shard_index || 0 }}
-      TOTAL_SHARDS: ${{ github.event.inputs.total_shards || 1 }}
-      SKIP_RECENT_DAYS: ${{ github.event.inputs.skip_recent_days || 0 }}
+      SHARD_INDEX: ${{ matrix.shard }}
+      TOTAL_SHARDS: ${{ needs.prepare-manual.outputs.total }}
+      SKIP_RECENT_DAYS: ${{ needs.prepare-manual.outputs.skip }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install --upgrade "playwright>=1.47.1"
           playwright install --with-deps chromium
-
       - name: Write Google credentials
         shell: bash
         env:
@@ -113,7 +125,6 @@ jobs:
             printf '%s' "${RAW_JSON:-}" > credentials.json
           fi
           test -s credentials.json
-
       - name: Refuse deprecated keyfile loader
         shell: bash
         run: |
@@ -121,8 +132,7 @@ jobs:
             echo "ERROR: old keyfile_name loader found; refusing to run."
             exit 1
           fi
-
-      - name: Run checker (manual)
+      - name: Run checker (manual shards)
         env:
           SHARD_INDEX: ${{ env.SHARD_INDEX }}
           TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
