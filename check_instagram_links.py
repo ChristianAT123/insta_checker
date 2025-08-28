@@ -22,7 +22,7 @@ LAST_CHECKED_COL = 15  # O: Last Checked
 
 # Behavior
 START_ROW = 2
-SKIP_STATUS_VALUES = {"removed"}      # we re-check Unknown and Login Required and Active
+SKIP_STATUS_VALUES = {"removed"}      # we re-check Unknown and Active
 DELAY_RANGE = (4.0, 7.0)
 
 # Browser timing
@@ -142,7 +142,7 @@ def check_instagram(page, url: str) -> str:
     """
     IG:
       - REMOVED if we see IG's removal text (or very clear failure).
-      - LOGIN_REQUIRED if we hit the login wall without removal text.
+      - ACTIVE if we hit the login wall without removal text.
       - ACTIVE if we can see post containers (article/video/og tags).
       - otherwise UNKNOWN.
     """
@@ -172,9 +172,9 @@ def check_instagram(page, url: str) -> str:
     if contains_any(body, [p.lower() for p in INST_REMOVAL_PHRASES]):
         return "removed"
 
-    # Login wall without removal content
+    # Login wall without removal content -> Active per request
     if looks_like_login(body, cur_url):
-        return "login required"
+        return "active"
 
     # Active signals (visible media containers or OG tags)
     try:
@@ -231,9 +231,9 @@ def check_facebook(page, url: str) -> str:
     if contains_any(body, [x.lower() for x in FB_REMOVAL]):
         return "removed"
 
-    # If it looks like a login wall (no clear removal)
+    # Login wall without clear removal -> Active per request
     if looks_like_login(body, cur_url):
-        return "login required"
+        return "active"
 
     code = resp.status if resp else 0
     if code and 200 <= code < 400:
