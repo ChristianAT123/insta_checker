@@ -1,31 +1,28 @@
+# check_instagram_links.py
 import os
 import re
 import json
 import time
 import random
 from urllib.parse import urlparse
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ==== CONFIG: Primary sheet ====
 SHEET_ID = "1sPsWqoEqd1YmD752fuz7j1K3VSGggpzlkc_Tp7Pr4jQ"
 TAB = "Logs"
 
-# Columns are 1-based indexes
-URL_COL = 6            # F: Infringing URL
-STATUS_COL = 13        # M: Status
-REMOVAL_DATE_COL = 14  # N: Removal Date
-LAST_CHECKED_COL = 15  # O: Last Checked
+URL_COL = 6
+STATUS_COL = 13
+REMOVAL_DATE_COL = 14
+LAST_CHECKED_COL = 15
 
-# Behavior
 START_ROW = 2
-SKIP_STATUS_VALUES = {"removed"}      # we re-check Unknown and Active
+SKIP_STATUS_VALUES = {"removed"}
 DELAY_RANGE = (4.0, 7.0)
 
-# Browser timing
 NAV_TIMEOUT_MS = 15000
 NETWORK_IDLE_MS = 7000
 SETTLE_SLEEP_S = 2.0
@@ -36,7 +33,6 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-# --- Text fingerprints (lowercased when compared) ---
 INST_REMOVAL_PHRASES = [
     "sorry, this page isn't available",
     "the link you followed may be broken",
@@ -56,11 +52,8 @@ FB_REMOVAL = [
     "this content isn't available right now",
 ]
 
-# Threads: removed posts redirect to this
-THREADS_REMOVED_URL_FRAGMENT = "threads.com/?error=invalid_post"
 THREADS_UNAVAILABLE_BADGE = "post unavailable"
 
-# Login-wall fingerprints (kept conservative)
 LOGIN_CUES = [
     "log in",
     "sign up",
@@ -69,14 +62,13 @@ LOGIN_CUES = [
     "log in to facebook",
 ]
 
-# ----------------- Sheets auth -----------------
+FLUSH_EVERY = 250
+
 def make_gspread_client():
-    """Load service-account creds from env (raw/base64) or credentials.json."""
     scope = [
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-
     env_val = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GOOGLE_CREDENTIALS_JSON")
     if env_val:
         s = env_val.strip()
@@ -92,8 +84,7 @@ def make_gspread_client():
                 ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             )
         except Exception:
-            pass  # fall through
-
+            pass
     for path in [os.getenv("GOOGLE_APPLICATION_CREDENTIALS"), "credentials.json"]:
         if path and os.path.isfile(path):
             raw = open(path, "rb").read().lstrip(b"\xef\xbb\xbf\r\n\t ")
@@ -101,10 +92,8 @@ def make_gspread_client():
             return gspread.authorize(
                 ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
             )
-
     raise RuntimeError("Could not load Google credentials from env or credentials.json")
 
-# ----------------- Helpers -----------------
 def normalize_url(u: str) -> str:
     return (u or "").strip()
 
@@ -135,20 +124,25 @@ def contains_any(haystack: str, needles) -> bool:
     return any(n in haystack for n in needles)
 
 def looks_like_login(body: str, url_now: str) -> bool:
-    return ("/accounts/login" in url_now) or contains_any(body, LOGIN_CUES)
+    return ("/accounts/login" in (url_now or "")) or contains_any(body or "", LOGIN_CUES)
 
-# ----------------- Per-platform checkers -----------------
+def parse_mmddyyyy(s: str):
+    try:
+        return datetime.strptime(s.strip(), "%m/%d/%Y")
+    except Exception:
+        return None
+
+def recent_enough(last_str: str, skip_days: int) -> bool:
+    if skip_days <= 0:
+        return False
+    d = parse_mmddyyyy(last_str or "")
+    if not d:
+        return False
+    return (datetime.now() - d) < timedelta(days=skip_days)
+
 def check_instagram(page, url: str) -> str:
-    """
-    IG:
-      - REMOVED if we see IG's removal text (or very clear failure).
-      - ACTIVE if we hit the login wall without removal text.
-      - ACTIVE if we can see post containers (article/video/og tags).
-      - otherwise UNKNOWN.
-    """
     page.set_default_navigation_timeout(NAV_TIMEOUT_MS)
     page.set_default_timeout(NAV_TIMEOUT_MS)
-
     try:
         resp = page.goto(url, wait_until="domcontentloaded")
     except PWTimeout:
@@ -158,22 +152,17 @@ def check_instagram(page, url: str) -> str:
             return "unknown"
     except Exception:
         return "unknown"
-
     try:
         page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
     except Exception:
         pass
     time.sleep(SETTLE_SLEEP_S)
-
     body = page_text(page)
     cur_url = page.url
-
     if contains_any(body, [p.lower() for p in INST_REMOVAL_PHRASES]):
         return "removed"
-
     if looks_like_login(body, cur_url):
         return "active"
-
     try:
         if page.query_selector("article, video, div[role='dialog']"):
             return "active"
@@ -181,7 +170,6 @@ def check_instagram(page, url: str) -> str:
             return "active"
     except Exception:
         pass
-
     return "unknown"
 
 def check_youtube(page, url: str) -> str:
@@ -215,22 +203,17 @@ def check_facebook(page, url: str) -> str:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
     except Exception:
         return "unknown"
-
     try:
         page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
     except Exception:
         pass
     time.sleep(SETTLE_SLEEP_S)
-
     body = page_text(page)
-    cur_url = page.url.lower()
-
+    cur_url = page.url.lower() if page.url else ""
     if contains_any(body, [x.lower() for x in FB_REMOVAL]):
         return "removed"
-
     if looks_like_login(body, cur_url):
         return "active"
-
     code = resp.status if resp else 0
     if code and 200 <= code < 400:
         return "active"
@@ -241,21 +224,14 @@ def check_threads(page, url: str) -> str:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
     except Exception:
         return "unknown"
-
-    final_url = page.url.lower()
-    if "error=invalid_post" in final_url:
-        return "removed"
-
     try:
         page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
     except Exception:
         pass
     time.sleep(SETTLE_SLEEP_S)
-
     body = page_text(page)
     if THREADS_UNAVAILABLE_BADGE in body:
         return "removed"
-
     code = resp.status if resp else 0
     if code and 200 <= code < 400:
         return "active"
@@ -273,7 +249,6 @@ def check_one(page, url: str) -> str:
         return check_facebook(page, url)
     if p == "threads":
         return check_threads(page, url)
-
     try:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         code = resp.status if resp else 0
@@ -281,7 +256,6 @@ def check_one(page, url: str) -> str:
     except Exception:
         return "unknown"
 
-# ----------------- Main -----------------
 def main():
     gc = make_gspread_client()
     ws = gc.open_by_key(SHEET_ID).worksheet(TAB)
@@ -291,8 +265,18 @@ def main():
         print("No data.")
         return
 
+    SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
+    TOTAL_SHARDS = int(os.getenv("TOTAL_SHARDS", "1"))
+    SKIP_RECENT_DAYS = int(os.getenv("SKIP_RECENT_DAYS", "0"))
+
     today = datetime.now().strftime("%m/%d/%Y")
     updates = []
+
+    def flush():
+        nonlocal updates
+        if updates:
+            ws.batch_update(updates)
+            updates = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -300,15 +284,22 @@ def main():
         page = context.new_page()
 
         for i in range(START_ROW - 1, len(values)):
-            row_idx = i + 1  # 1-based
+            row_idx = i + 1
+            if (i % TOTAL_SHARDS) != SHARD_INDEX:
+                continue
+
             row = values[i]
             url = normalize_url(row[URL_COL - 1] if len(row) >= URL_COL else "")
             status_now = (row[STATUS_COL - 1] if len(row) >= STATUS_COL else "").strip().lower()
+            last_checked_str = (row[LAST_CHECKED_COL - 1] if len(row) >= LAST_CHECKED_COL else "").strip()
 
             if not url:
                 continue
             if status_now in SKIP_STATUS_VALUES:
                 print(f"⏭️  Skipping row {row_idx} (status: '{status_now}')")
+                continue
+            if SKIP_RECENT_DAYS > 0 and recent_enough(last_checked_str, SKIP_RECENT_DAYS):
+                print(f"⏭️  Skipping row {row_idx} (recent: '{last_checked_str}')")
                 continue
 
             print(f"🔎 Checking row {row_idx}: {url}")
@@ -322,17 +313,18 @@ def main():
                 "values": [[result.title(), removal_date, last_checked]],
             })
 
+            if len(updates) >= FLUSH_EVERY:
+                flush()
+
             sleep_for = random.uniform(*DELAY_RANGE)
             print(f"   → {result} | sleeping {sleep_for:.1f}s")
             time.sleep(sleep_for)
 
         browser.close()
 
-    if updates:
-        ws.batch_update(updates)
+    flush()
     print("✅ Done.")
 
-# Utility: 1-based column index → letters (13 → 'M')
 def col_letter(n: int) -> str:
     s = ""
     while n > 0:
