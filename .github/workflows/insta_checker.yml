@@ -2,13 +2,9 @@ name: Insta Checker
 
 on:
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "0 3 * * *"   # ~10PM ET
   workflow_dispatch:
     inputs:
-      shard_index:
-        description: "IGNORE for parallel manual run"
-        required: false
-        default: "0"
       total_shards:
         description: "Total shards for manual run (e.g. 8)"
         required: false
@@ -33,16 +29,19 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install --upgrade "playwright>=1.47.1"
           playwright install --with-deps chromium
+
       - name: Write Google credentials
         shell: bash
         env:
@@ -56,6 +55,7 @@ jobs:
             printf '%s' "${RAW_JSON:-}" > credentials.json
           fi
           test -s credentials.json
+
       - name: Refuse deprecated keyfile loader
         shell: bash
         run: |
@@ -63,6 +63,7 @@ jobs:
             echo "ERROR: old keyfile_name loader found; refusing to run."
             exit 1
           fi
+
       - name: Run checker (nightly shards)
         env:
           SHARD_INDEX: ${{ env.SHARD_INDEX }}
@@ -70,7 +71,6 @@ jobs:
           SKIP_RECENT_DAYS: ${{ env.SKIP_RECENT_DAYS }}
         run: python -u check_instagram_links.py
 
-  # --- NEW: build a dynamic matrix for manual runs ---
   prepare-manual:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
@@ -102,16 +102,19 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install --upgrade "playwright>=1.47.1"
           playwright install --with-deps chromium
+
       - name: Write Google credentials
         shell: bash
         env:
@@ -125,6 +128,7 @@ jobs:
             printf '%s' "${RAW_JSON:-}" > credentials.json
           fi
           test -s credentials.json
+
       - name: Refuse deprecated keyfile loader
         shell: bash
         run: |
@@ -132,6 +136,7 @@ jobs:
             echo "ERROR: old keyfile_name loader found; refusing to run."
             exit 1
           fi
+
       - name: Run checker (manual shards)
         env:
           SHARD_INDEX: ${{ env.SHARD_INDEX }}
