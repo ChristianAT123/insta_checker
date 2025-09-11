@@ -1,9 +1,5 @@
 # check_instagram_links.py
-import os
-import re
-import json
-import time
-import random
+import os, re, json, time, random
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
 
@@ -11,28 +7,42 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ===== Primary sheet (existing) =====
-SHEET_ID = "1sPsWqoEqd1YmD752fuz7j1K3VSGggpzlkc_Tp7Pr4jQ"
-TAB = "Logs"
-URL_COL = 6
-STATUS_COL = 13
-REMOVAL_DATE_COL = 14
-LAST_CHECKED_COL = 15
+# --------- Multi-sheet config ---------
+CONFIG = {
+    "primary": {
+        "sheet_id": "1sPsWqoEqd1YmD752fuz7j1K3VSGggpzlkc_Tp7Pr4jQ",
+        "tabs": ["Logs"],
+        "url_col": 6,   # F
+        "status_col": 13,  # M
+        "removal_col": 14, # N
+        "checked_col": 15, # O
+        "start_row": 2,
+    },
+    "fb_rm": {
+        "sheet_id": "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY",
+        "tabs": ["Facebook RM Archives"],
+        "url_col": 10,  # J
+        "status_col": 15,  # O
+        "removal_col": 16, # P
+        "checked_col": 17, # Q
+        "start_row": 2,
+    },
+    "ig_rm": {
+        "sheet_id": "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY",
+        "tabs": ["Instagram RM Archives"],
+        "url_col": 10,  # J
+        "status_col": 15,  # O
+        "removal_col": 16, # P
+        "checked_col": 17, # Q
+        "start_row": 2,
+    },
+}
 
-# ===== Additional sheet (two tabs) =====
-ARCHIVE_SHEET_ID = "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY"
-ARCHIVE_TABS = [
-    ("Facebook RM Archives", dict(URL=10, STATUS=15, REMOVAL=16, LAST=17)),
-    ("Instagram RM Archives", dict(URL=10, STATUS=15, REMOVAL=16, LAST=17)),
-]
-
-# Scheduler/runtime behavior
-START_ROW = 2
-SKIP_STATUS_VALUES = {"removed"}
+# --------- Behavior ---------
 DELAY_RANGE = (4.0, 7.0)
+SKIP_STATUS_VALUES = {"removed"}
 FLUSH_EVERY = 250
 
-# Browser timing
 NAV_TIMEOUT_MS = 15000
 NETWORK_IDLE_MS = 7000
 SETTLE_SLEEP_S = 2.0
@@ -54,12 +64,8 @@ FB_REMOVAL = ["this content isn't available right now"]
 THREADS_UNAVAILABLE_BADGE = "post unavailable"
 LOGIN_CUES = ["log in", "sign up", "/accounts/login", "login.facebook", "log in to facebook"]
 
-
 def make_gspread_client():
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive",
-    ]
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     env_val = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GOOGLE_CREDENTIALS_JSON")
     if env_val:
         s = env_val.strip()
@@ -71,31 +77,24 @@ def make_gspread_client():
                 pass
         try:
             creds_dict = json.loads(s)
-            return gspread.authorize(
-                ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            )
+            return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope))
         except Exception:
             pass
     for path in [os.getenv("GOOGLE_APPLICATION_CREDENTIALS"), "credentials.json"]:
         if path and os.path.isfile(path):
             raw = open(path, "rb").read().lstrip(b"\xef\xbb\xbf\r\n\t ")
             creds_dict = json.loads(raw.decode("utf-8"))
-            return gspread.authorize(
-                ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-            )
+            return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope))
     raise RuntimeError("Could not load Google credentials from env or credentials.json")
-
 
 def normalize_url(u: str) -> str:
     return (u or "").strip()
-
 
 def page_text(page) -> str:
     try:
         return (page.content() or "").lower()
     except Exception:
         return ""
-
 
 def host_platform(u: str) -> str:
     try:
@@ -114,21 +113,17 @@ def host_platform(u: str) -> str:
         return "threads"
     return "unknown"
 
-
 def contains_any(haystack: str, needles) -> bool:
     return any(n in haystack for n in needles)
 
-
 def looks_like_login(body: str, url_now: str) -> bool:
     return ("/accounts/login" in (url_now or "")) or contains_any(body or "", LOGIN_CUES)
-
 
 def parse_mmddyyyy(s: str):
     try:
         return datetime.strptime(s.strip(), "%m/%d/%Y")
     except Exception:
         return None
-
 
 def recent_enough(last_str: str, skip_days: int) -> bool:
     if skip_days <= 0:
@@ -138,15 +133,14 @@ def recent_enough(last_str: str, skip_days: int) -> bool:
         return False
     return (datetime.now() - d) < timedelta(days=skip_days)
 
-
 def check_instagram(page, url: str) -> str:
     page.set_default_navigation_timeout(NAV_TIMEOUT_MS)
     page.set_default_timeout(NAV_TIMEOUT_MS)
     try:
-        resp = page.goto(url, wait_until="domcontentloaded")
+        page.goto(url, wait_until="domcontentloaded")
     except PWTimeout:
         try:
-            resp = page.goto(url, wait_until="networkidle")
+            page.goto(url, wait_until="networkidle")
         except Exception:
             return "unknown"
     except Exception:
@@ -171,7 +165,6 @@ def check_instagram(page, url: str) -> str:
         pass
     return "unknown"
 
-
 def check_youtube(page, url: str) -> str:
     try:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
@@ -185,7 +178,6 @@ def check_youtube(page, url: str) -> str:
         return "active"
     return "unknown"
 
-
 def check_tiktok(page, url: str) -> str:
     try:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
@@ -198,7 +190,6 @@ def check_tiktok(page, url: str) -> str:
     if code and 200 <= code < 400:
         return "active"
     return "unknown"
-
 
 def check_facebook(page, url: str) -> str:
     try:
@@ -221,7 +212,6 @@ def check_facebook(page, url: str) -> str:
         return "active"
     return "unknown"
 
-
 def check_threads(page, url: str) -> str:
     try:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
@@ -239,7 +229,6 @@ def check_threads(page, url: str) -> str:
     if code and 200 <= code < 400:
         return "active"
     return "unknown"
-
 
 def check_one(page, url: str) -> str:
     p = host_platform(url)
@@ -260,26 +249,11 @@ def check_one(page, url: str) -> str:
     except Exception:
         return "unknown"
 
-
-def col_letter(n: int) -> str:
-    s = ""
-    while n > 0:
-        n, r = divmod(n - 1, 26)
-        s = chr(65 + r) + s
-    return s
-
-
-def run_one_sheet(gc, sheet_id: str, tab: str, cols: dict, page):
-    ws = gc.open_by_key(sheet_id).worksheet(tab)
+def run_sheet(gc, cfg, page):
+    ws = gc.open_by_key(cfg["sheet_id"]).worksheet(cfg["tabs"][0])
     values = ws.get_all_values()
     if not values:
         return
-
-    URLC = cols["URL"]
-    STC = cols["STATUS"]
-    RDC = cols["REMOVAL"]
-    LCC = cols["LAST"]
-
     SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
     TOTAL_SHARDS = int(os.getenv("TOTAL_SHARDS", "1"))
     SKIP_RECENT_DAYS = int(os.getenv("SKIP_RECENT_DAYS", "0"))
@@ -293,33 +267,39 @@ def run_one_sheet(gc, sheet_id: str, tab: str, cols: dict, page):
             ws.batch_update(updates)
             updates = []
 
-    for i in range(START_ROW - 1, len(values)):
+    start_row = cfg["start_row"]
+    URL_COL = cfg["url_col"]
+    STATUS_COL = cfg["status_col"]
+    REMOVAL_DATE_COL = cfg["removal_col"]
+    LAST_CHECKED_COL = cfg["checked_col"]
+
+    for i in range(start_row - 1, len(values)):
         row_idx = i + 1
         if (i % TOTAL_SHARDS) != SHARD_INDEX:
             continue
 
         row = values[i]
-        url = normalize_url(row[URLC - 1] if len(row) >= URLC else "")
-        status_now = (row[STC - 1] if len(row) >= STC else "").strip().lower()
-        last_checked_str = (row[LCC - 1] if len(row) >= LCC else "").strip()
+        url = normalize_url(row[URL_COL - 1] if len(row) >= URL_COL else "")
+        status_now = (row[STATUS_COL - 1] if len(row) >= STATUS_COL else "").strip().lower()
+        last_checked_str = (row[LAST_CHECKED_COL - 1] if len(row) >= LAST_CHECKED_COL else "").strip()
 
         if not url:
             continue
         if status_now in SKIP_STATUS_VALUES:
-            print(f"⏭️  Skipping row {row_idx} [{tab}] (status: '{status_now}')")
+            print(f"⏭️  Skipping row {row_idx} (status: '{status_now}')")
             continue
         if SKIP_RECENT_DAYS > 0 and recent_enough(last_checked_str, SKIP_RECENT_DAYS):
-            print(f"⏭️  Skipping row {row_idx} [{tab}] (recent: '{last_checked_str}')")
+            print(f"⏭️  Skipping row {row_idx} (recent: '{last_checked_str}')")
             continue
 
-        print(f"🔎 [{tab}] Checking row {row_idx}: {url}")
+        print(f"🔎 Checking row {row_idx}: {url}")
         result = check_one(page, url)
 
         removal_date = today if result == "removed" else ""
         last_checked = today
 
         updates.append({
-            "range": f"{col_letter(STC)}{row_idx}:{col_letter(LCC)}{row_idx}",
+            "range": f"{col_letter(STATUS_COL)}{row_idx}:{col_letter(LAST_CHECKED_COL)}{row_idx}",
             "values": [[result.title(), removal_date, last_checked]],
         })
 
@@ -332,49 +312,28 @@ def run_one_sheet(gc, sheet_id: str, tab: str, cols: dict, page):
 
     flush()
 
-
 def main():
+    which = (os.getenv("SHEET_KEY") or "primary").strip().lower()
+    if which not in CONFIG:
+        which = "primary"
+    cfg = CONFIG[which]
+
     gc = make_gspread_client()
-
-    run_list_env = os.getenv("SHEETS_INPUT", "").strip()
-    if run_list_env:
-        try:
-            parsed = json.loads(run_list_env)
-            run_list = []
-            for item in parsed:
-                run_list.append(
-                    (
-                        item["sheet_id"],
-                        item["tab"],
-                        dict(
-                            URL=int(item["cols"]["URL"]),
-                            STATUS=int(item["cols"]["STATUS"]),
-                            REMOVAL=int(item["cols"]["REMOVAL"]),
-                            LAST=int(item["cols"]["LAST"]),
-                        ),
-                    )
-                )
-        except Exception:
-            run_list = []
-    else:
-        run_list = [
-            (SHEET_ID, TAB, dict(URL=URL_COL, STATUS=STATUS_COL, REMOVAL=REMOVAL_DATE_COL, LAST=LAST_CHECKED_COL)),
-            *[(ARCHIVE_SHEET_ID, t, c) for t, c in ARCHIVE_TABS],
-        ]
-
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=USER_AGENT)
         page = context.new_page()
-
-        for sheet_id, tab, cols in run_list:
-            print(f"=== Running: {sheet_id} / {tab} ===")
-            run_one_sheet(gc, sheet_id, tab, cols, page)
-
+        print(f"=== Running: {cfg['sheet_id']} / {cfg['tabs'][0]} ===")
+        run_sheet(gc, cfg, page)
         browser.close()
-
     print("✅ Done.")
 
+def col_letter(n: int) -> str:
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
 
 if __name__ == "__main__":
     main()
