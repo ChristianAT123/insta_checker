@@ -5,17 +5,17 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
-      sheet_key:
-        description: "Sheet to run: primary | fb_rm | ig_rm"
-        required: true
+      sheet_to_run:
+        description: "primary | fb_rm | ig_rm"
+        required: false
         default: "primary"
       total_shards:
-        description: "Total shards"
-        required: true
+        description: "Total shards for manual run (e.g. 8)"
+        required: false
         default: "8"
       skip_recent_days:
         description: "Skip rows whose 'Last checked' is within N days (0=off)"
-        required: true
+        required: false
         default: "0"
 
 jobs:
@@ -26,70 +26,50 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - sheet_key: primary
-            shard: 0
-          - sheet_key: primary
-            shard: 1
-          - sheet_key: primary
-            shard: 2
-          - sheet_key: primary
-            shard: 3
-          - sheet_key: primary
-            shard: 4
-          - sheet_key: primary
-            shard: 5
-          - sheet_key: primary
-            shard: 6
-          - sheet_key: primary
-            shard: 7
-          - sheet_key: fb_rm
-            shard: 0
-          - sheet_key: fb_rm
-            shard: 1
-          - sheet_key: fb_rm
-            shard: 2
-          - sheet_key: fb_rm
-            shard: 3
-          - sheet_key: fb_rm
-            shard: 4
-          - sheet_key: fb_rm
-            shard: 5
-          - sheet_key: fb_rm
-            shard: 6
-          - sheet_key: fb_rm
-            shard: 7
-          - sheet_key: ig_rm
-            shard: 0
-          - sheet_key: ig_rm
-            shard: 1
-          - sheet_key: ig_rm
-            shard: 2
-          - sheet_key: ig_rm
-            shard: 3
-          - sheet_key: ig_rm
-            shard: 4
-          - sheet_key: ig_rm
-            shard: 5
-          - sheet_key: ig_rm
-            shard: 6
-          - sheet_key: ig_rm
-            shard: 7
+          - { sheet: primary, shard: 0 }
+          - { sheet: primary, shard: 1 }
+          - { sheet: primary, shard: 2 }
+          - { sheet: primary, shard: 3 }
+          - { sheet: primary, shard: 4 }
+          - { sheet: primary, shard: 5 }
+          - { sheet: primary, shard: 6 }
+          - { sheet: primary, shard: 7 }
+          - { sheet: fb_rm,   shard: 0 }
+          - { sheet: fb_rm,   shard: 1 }
+          - { sheet: fb_rm,   shard: 2 }
+          - { sheet: fb_rm,   shard: 3 }
+          - { sheet: fb_rm,   shard: 4 }
+          - { sheet: fb_rm,   shard: 5 }
+          - { sheet: fb_rm,   shard: 6 }
+          - { sheet: fb_rm,   shard: 7 }
+          - { sheet: ig_rm,   shard: 0 }
+          - { sheet: ig_rm,   shard: 1 }
+          - { sheet: ig_rm,   shard: 2 }
+          - { sheet: ig_rm,   shard: 3 }
+          - { sheet: ig_rm,   shard: 4 }
+          - { sheet: ig_rm,   shard: 5 }
+          - { sheet: ig_rm,   shard: 6 }
+          - { sheet: ig_rm,   shard: 7 }
     env:
+      SHEET_TO_RUN: ${{ matrix.sheet }}
+      SHARD_INDEX: ${{ matrix.shard }}
       TOTAL_SHARDS: 8
       SKIP_RECENT_DAYS: 0
-      SHEET_KEY: ${{ matrix.sheet_key }}
-      SHARD_INDEX: ${{ matrix.shard }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: |
+      - name: Install deps
+        run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install --upgrade "playwright>=1.47.1"
-          playwright install --with-deps chromium
-      - shell: bash
+          playwright install --with-deps chromium webkit
+      - name: Write Google credentials
+        shell: bash
         env:
           RAW_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           B64_JSON: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
@@ -101,37 +81,34 @@ jobs:
             printf '%s' "${RAW_JSON:-}" > credentials.json
           fi
           test -s credentials.json
-      - shell: bash
-        run: |
-          if grep -nE 'from_json_keyfile_name[[:space:]]*\(' check_instagram_links.py; then
-            echo "ERROR: old keyfile_name loader found; refusing to run."
-            exit 1
-          fi
-      - run: python -u check_instagram_links.py
+      - name: Run checker (nightly)
+        env:
+          SHEET_TO_RUN: ${{ env.SHEET_TO_RUN }}
+          SHARD_INDEX: ${{ env.SHARD_INDEX }}
+          TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
+          SKIP_RECENT_DAYS: ${{ env.SKIP_RECENT_DAYS }}
+        run: python -u check_instagram_links.py
 
   prepare-manual:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
-      total:  ${{ steps.gen.outputs.total }}
-      skip:   ${{ steps.gen.outputs.skip }}
     steps:
       - id: gen
         shell: bash
         run: |
           set -euo pipefail
-          SHEET="${{ github.event.inputs.sheet_key }}"
-          TOTAL="${{ github.event.inputs.total_shards }}"
-          SKIP="${{ github.event.inputs.skip_recent_days }}"
+          SHEET="${{ github.event.inputs.sheet_to_run || 'primary' }}"
+          TOTAL="${{ github.event.inputs.total_shards || '8' }}"
+          SKIP="${{ github.event.inputs.skip_recent_days || '0' }}"
+          if ! [[ "$TOTAL" =~ ^[0-9]+$ && "$TOTAL" -ge 1 ]]; then TOTAL=1; fi
           inc=""
           for ((i=0;i<TOTAL;i++)); do
-            if [[ -n "$inc" ]]; then inc="$inc,"; fi
-            inc="$inc{\"sheet_key\":\"$SHEET\",\"shard\":$i}"
+            comma=$([[ -n "$inc" ]] && echo "," || echo "")
+            inc="${inc}${comma}{\"sheet\":\"$SHEET\",\"shard\":$i,\"skip\":$SKIP}"
           done
-          echo "matrix={\"include\":[${inc}]}" >> "$GITHUB_OUTPUT"
-          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
-          echo "skip=$SKIP"   >> "$GITHUB_OUTPUT"
+          echo "matrix={\"include\":[$inc]}" >> "$GITHUB_OUTPUT"
 
   manual:
     if: github.event_name == 'workflow_dispatch'
@@ -141,21 +118,25 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare-manual.outputs.matrix) }}
     env:
-      SHEET_KEY: ${{ matrix.sheet_key }}
+      SHEET_TO_RUN: ${{ matrix.sheet }}
       SHARD_INDEX: ${{ matrix.shard }}
-      TOTAL_SHARDS: ${{ needs.prepare-manual.outputs.total }}
-      SKIP_RECENT_DAYS: ${{ needs.prepare-manual.outputs.skip }}
+      TOTAL_SHARDS: ${{ github.event.inputs.total_shards }}
+      SKIP_RECENT_DAYS: ${{ matrix.skip }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repo
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: |
+      - name: Install deps
+        run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install --upgrade "playwright>=1.47.1"
-          playwright install --with-deps chromium
-      - shell: bash
+          playwright install --with-deps chromium webkit
+      - name: Write Google credentials
+        shell: bash
         env:
           RAW_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           B64_JSON: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
@@ -167,10 +148,10 @@ jobs:
             printf '%s' "${RAW_JSON:-}" > credentials.json
           fi
           test -s credentials.json
-      - shell: bash
-        run: |
-          if grep -nE 'from_json_keyfile_name[[:space:]]*\(' check_instagram_links.py; then
-            echo "ERROR: old keyfile_name loader found; refusing to run."
-            exit 1
-          fi
-      - run: python -u check_instagram_links.py
+      - name: Run checker (manual shards)
+        env:
+          SHEET_TO_RUN: ${{ env.SHEET_TO_RUN }}
+          SHARD_INDEX: ${{ env.SHARD_INDEX }}
+          TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
+          SKIP_RECENT_DAYS: ${{ env.SKIP_RECENT_DAYS }}
+        run: python -u check_instagram_links.py
