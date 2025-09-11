@@ -2,11 +2,15 @@ name: Insta Checker
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # ~10PM ET
+    - cron: "0 3 * * *"   # ~10 PM US/Eastern
   workflow_dispatch:
     inputs:
+      choose_sheet:
+        description: "Sheet to run: primary | fb_rm | ig_rm"
+        required: false
+        default: "primary"
       total_shards:
-        description: "Total shards for manual run (e.g. 8)"
+        description: "Total shards"
         required: false
         default: "8"
       skip_recent_days:
@@ -14,8 +18,18 @@ on:
         required: false
         default: "0"
 
+env:
+  PRIMARY_SHEET_ID: "1sPsWqoEqd1YmD752fuz7j1K3VSGggpzlkc_Tp7Pr4jQ"
+  PRIMARY_TAB: "Logs"
+
+  FB_RM_SHEET_ID: "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY"
+  FB_RM_TAB: "Facebook RM Archives"
+
+  IG_RM_SHEET_ID: "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY"
+  IG_RM_TAB: "Instagram RM Archives"
+
 jobs:
-  nightly:
+  nightly-primary:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-22.04
     strategy:
@@ -23,25 +37,20 @@ jobs:
       matrix:
         shard: [0,1,2,3,4,5,6,7]
     env:
+      WHICH_SHEET: primary
       SHARD_INDEX: ${{ matrix.shard }}
       TOTAL_SHARDS: 8
       SKIP_RECENT_DAYS: 0
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
-      - name: Install deps
-        run: |
+      - run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install --upgrade "playwright>=1.47.1"
           playwright install --with-deps chromium
-
       - name: Write Google credentials
         shell: bash
         env:
@@ -49,13 +58,8 @@ jobs:
           B64_JSON: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
         run: |
           set -euo pipefail
-          if [[ -n "${B64_JSON:-}" ]]; then
-            printf '%s' "$B64_JSON" | base64 -d > credentials.json
-          else
-            printf '%s' "${RAW_JSON:-}" > credentials.json
-          fi
+          if [[ -n "${B64_JSON:-}" ]]; then printf '%s' "$B64_JSON" | base64 -d > credentials.json; else printf '%s' "${RAW_JSON:-}" > credentials.json; fi
           test -s credentials.json
-
       - name: Refuse deprecated keyfile loader
         shell: bash
         run: |
@@ -63,12 +67,122 @@ jobs:
             echo "ERROR: old keyfile_name loader found; refusing to run."
             exit 1
           fi
-
-      - name: Run checker (nightly shards)
+      - name: Run checker (primary)
         env:
+          WHICH_SHEET: ${{ env.WHICH_SHEET }}
           SHARD_INDEX: ${{ env.SHARD_INDEX }}
           TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
           SKIP_RECENT_DAYS: ${{ env.SKIP_RECENT_DAYS }}
+          PRIMARY_SHEET_ID: ${{ env.PRIMARY_SHEET_ID }}
+          PRIMARY_TAB: ${{ env.PRIMARY_TAB }}
+          FB_RM_SHEET_ID: ${{ env.FB_RM_SHEET_ID }}
+          FB_RM_TAB: ${{ env.FB_RM_TAB }}
+          IG_RM_SHEET_ID: ${{ env.IG_RM_SHEET_ID }}
+          IG_RM_TAB: ${{ env.IG_RM_TAB }}
+        run: python -u check_instagram_links.py
+
+  nightly-fb:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7]
+    env:
+      WHICH_SHEET: fb_rm
+      SHARD_INDEX: ${{ matrix.shard }}
+      TOTAL_SHARDS: 8
+      SKIP_RECENT_DAYS: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install --upgrade "playwright>=1.47.1"
+          playwright install --with-deps chromium
+      - name: Write Google credentials
+        shell: bash
+        env:
+          RAW_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          B64_JSON: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${B64_JSON:-}" ]]; then printf '%s' "$B64_JSON" | base64 -d > credentials.json; else printf '%s' "${RAW_JSON:-}" > credentials.json; fi
+          test -s credentials.json
+      - name: Refuse deprecated keyfile loader
+        shell: bash
+        run: |
+          if grep -nE 'from_json_keyfile_name[[:space:]]*\(' check_instagram_links.py; then
+            echo "ERROR: old keyfile_name loader found; refusing to run."
+            exit 1
+          fi
+      - name: Run checker (fb_rm)
+        env:
+          WHICH_SHEET: ${{ env.WHICH_SHEET }}
+          SHARD_INDEX: ${{ env.SHARD_INDEX }}
+          TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
+          SKIP_RECENT_DAYS: ${{ env.SKIP_RECENT_DAYS }}
+          PRIMARY_SHEET_ID: ${{ env.PRIMARY_SHEET_ID }}
+          PRIMARY_TAB: ${{ env.PRIMARY_TAB }}
+          FB_RM_SHEET_ID: ${{ env.FB_RM_SHEET_ID }}
+          FB_RM_TAB: ${{ env.FB_RM_TAB }}
+          IG_RM_SHEET_ID: ${{ env.IG_RM_SHEET_ID }}
+          IG_RM_TAB: ${{ env.IG_RM_TAB }}
+        run: python -u check_instagram_links.py
+
+  nightly-ig:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7]
+    env:
+      WHICH_SHEET: ig_rm
+      SHARD_INDEX: ${{ matrix.shard }}
+      TOTAL_SHARDS: 8
+      SKIP_RECENT_DAYS: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install --upgrade "playwright>=1.47.1"
+          playwright install --with-deps chromium
+      - name: Write Google credentials
+        shell: bash
+        env:
+          RAW_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          B64_JSON: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${B64_JSON:-}" ]]; then printf '%s' "$B64_JSON" | base64 -d > credentials.json; else printf '%s' "${RAW_JSON:-}" > credentials.json; fi
+          test -s credentials.json
+      - name: Refuse deprecated keyfile loader
+        shell: bash
+        run: |
+          if grep -nE 'from_json_keyfile_name[[:space:]]*\(' check_instagram_links.py; then
+            echo "ERROR: old keyfile_name loader found; refusing to run."
+            exit 1
+          fi
+      - name: Run checker (ig_rm)
+        env:
+          WHICH_SHEET: ${{ env.WHICH_SHEET }}
+          SHARD_INDEX: ${{ env.SHARD_INDEX }}
+          TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
+          SKIP_RECENT_DAYS: ${{ env.SKIP_RECENT_DAYS }}
+          PRIMARY_SHEET_ID: ${{ env.PRIMARY_SHEET_ID }}
+          PRIMARY_TAB: ${{ env.PRIMARY_TAB }}
+          FB_RM_SHEET_ID: ${{ env.FB_RM_SHEET_ID }}
+          FB_RM_TAB: ${{ env.FB_RM_TAB }}
+          IG_RM_SHEET_ID: ${{ env.IG_RM_SHEET_ID }}
+          IG_RM_TAB: ${{ env.IG_RM_TAB }}
         run: python -u check_instagram_links.py
 
   prepare-manual:
@@ -76,17 +190,21 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
-      total:  ${{ steps.gen.outputs.total }}
-      skip:   ${{ steps.gen.outputs.skip }}
     steps:
       - id: gen
         shell: bash
         run: |
           set -euo pipefail
-          TOTAL="${{ github.event.inputs.total_shards || '1' }}"
+          SHEET="${{ github.event.inputs.choose_sheet || 'primary' }}"
+          TOTAL="${{ github.event.inputs.total_shards || '8' }}"
           SKIP="${{ github.event.inputs.skip_recent_days || '0' }}"
-          if ! [[ "$TOTAL" =~ ^[0-9]+$ && "$TOTAL" -ge 1 ]]; then TOTAL=1; fi
-          seq 0 $((TOTAL-1)) | paste -sd, - | awk -v t="$TOTAL" -v s="$SKIP" '{print "matrix={\"shard\":[" $0 "]}\ntotal=" t "\nskip=" s}' >> "$GITHUB_OUTPUT"
+          json='{"include":['
+          for ((i=0;i<TOTAL;i++)); do
+            [[ $i -gt 0 ]] && json+=','
+            json+='{"sheet":"'"$SHEET"'","shard":'"$i"',"total":'"$TOTAL"',"skip":'"$SKIP"'}'
+          done
+          json+=']}'
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
 
   manual:
     if: github.event_name == 'workflow_dispatch'
@@ -96,25 +214,20 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare-manual.outputs.matrix) }}
     env:
+      WHICH_SHEET: ${{ matrix.sheet }}
       SHARD_INDEX: ${{ matrix.shard }}
-      TOTAL_SHARDS: ${{ needs.prepare-manual.outputs.total }}
-      SKIP_RECENT_DAYS: ${{ needs.prepare-manual.outputs.skip }}
+      TOTAL_SHARDS: ${{ matrix.total }}
+      SKIP_RECENT_DAYS: ${{ matrix.skip }}
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
-      - name: Install deps
-        run: |
+      - run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install --upgrade "playwright>=1.47.1"
           playwright install --with-deps chromium
-
       - name: Write Google credentials
         shell: bash
         env:
@@ -122,13 +235,8 @@ jobs:
           B64_JSON: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
         run: |
           set -euo pipefail
-          if [[ -n "${B64_JSON:-}" ]]; then
-            printf '%s' "$B64_JSON" | base64 -d > credentials.json
-          else
-            printf '%s' "${RAW_JSON:-}" > credentials.json
-          fi
+          if [[ -n "${B64_JSON:-}" ]]; then printf '%s' "$B64_JSON" | base64 -d > credentials.json; else printf '%s' "${RAW_JSON:-}" > credentials.json; fi
           test -s credentials.json
-
       - name: Refuse deprecated keyfile loader
         shell: bash
         run: |
@@ -136,10 +244,16 @@ jobs:
             echo "ERROR: old keyfile_name loader found; refusing to run."
             exit 1
           fi
-
-      - name: Run checker (manual shards)
+      - name: Run checker (manual)
         env:
+          WHICH_SHEET: ${{ env.WHICH_SHEET }}
           SHARD_INDEX: ${{ env.SHARD_INDEX }}
           TOTAL_SHARDS: ${{ env.TOTAL_SHARDS }}
           SKIP_RECENT_DAYS: ${{ env.SKIP_RECENT_DAYS }}
+          PRIMARY_SHEET_ID: ${{ env.PRIMARY_SHEET_ID }}
+          PRIMARY_TAB: ${{ env.PRIMARY_TAB }}
+          FB_RM_SHEET_ID: ${{ env.FB_RM_SHEET_ID }}
+          FB_RM_TAB: ${{ env.FB_RM_TAB }}
+          IG_RM_SHEET_ID: ${{ env.IG_RM_SHEET_ID }}
+          IG_RM_TAB: ${{ env.IG_RM_TAB }}
         run: python -u check_instagram_links.py
