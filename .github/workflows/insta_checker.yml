@@ -75,7 +75,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     outputs:
-      matrix: ${{ steps.gen.outputs.matrix }}
+      shards: ${{ steps.gen.outputs.shards }}
       total:  ${{ steps.gen.outputs.total }}
       skip:   ${{ steps.gen.outputs.skip }}
       sheet:  ${{ steps.gen.outputs.sheet }}
@@ -88,18 +88,8 @@ jobs:
           TOTAL="${{ github.event.inputs.total_shards || '8' }}"
           SKIP="${{ github.event.inputs.skip_recent_days || '0' }}"
           if ! [[ "$TOTAL" =~ ^[0-9]+$ && "$TOTAL" -ge 1 ]]; then TOTAL=8; fi
-          seq 0 $((TOTAL-1)) | paste -sd, - > /tmp/sh.csv
-          printf 'matrix={"include":[' > /tmp/m.json
-          i=0
-          while IFS=, read -r line; do
-            for sh in $line; do
-              [[ $i -gt 0 ]] && printf ',' >> /tmp/m.json
-              printf '{"sheet":"%s","shard":%s}' "$SHEET" "$sh" >> /tmp/m.json
-              i=$((i+1))
-            done
-          done < <(echo "$(cat /tmp/sh.csv)")
-          printf ']}\n' >> /tmp/m.json
-          echo "matrix=$(cat /tmp/m.json)" >> "$GITHUB_OUTPUT"
+          shards_json="$(seq 0 $((TOTAL-1)) | jq -R . | jq -s .)"
+          echo "shards=$shards_json" >> "$GITHUB_OUTPUT"
           echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
           echo "sheet=$SHEET" >> "$GITHUB_OUTPUT"
@@ -110,9 +100,10 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.prepare-manual.outputs.matrix) }}
+      matrix:
+        shard: ${{ fromJSON(needs.prepare-manual.outputs.shards) }}
     env:
-      SHEET_NAME: ${{ matrix.sheet }}
+      SHEET_NAME: ${{ needs.prepare-manual.outputs.sheet }}
       SHARD_INDEX: ${{ matrix.shard }}
       TOTAL_SHARDS: ${{ needs.prepare-manual.outputs.total }}
       SKIP_RECENT_DAYS: ${{ needs.prepare-manual.outputs.skip }}
