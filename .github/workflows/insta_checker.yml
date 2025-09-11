@@ -88,8 +88,8 @@ jobs:
           TOTAL="${{ github.event.inputs.total_shards || '8' }}"
           SKIP="${{ github.event.inputs.skip_recent_days || '0' }}"
           if ! [[ "$TOTAL" =~ ^[0-9]+$ && "$TOTAL" -ge 1 ]]; then TOTAL=8; fi
-          shards_json="$(seq 0 $((TOTAL-1)) | jq -R . | jq -s .)"
-          echo "shards=$shards_json" >> "$GITHUB_OUTPUT"
+          shards_csv="$(seq 0 $((TOTAL-1)) | paste -sd, -)"
+          echo "shards=[$shards_csv]" >> "$GITHUB_OUTPUT"
           echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
           echo "sheet=$SHEET" >> "$GITHUB_OUTPUT"
