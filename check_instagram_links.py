@@ -1,105 +1,74 @@
 # check_instagram_links.py
 import os
-import re
 import json
 import time
 import random
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 from datetime import datetime, timedelta
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ---- Sheet configs ----
+# ------------ Sheet configs (choose via env SHEET_TO_RUN: primary | fb_rm | ig_rm) ------------
 SHEETS = {
     "primary": {
         "sheet_id": "1sPsWqoEqd1YmD752fuz7j1K3VSGggpzlkc_Tp7Pr4jQ",
         "tabs": ["Logs"],
-        "url_col": 6,
-        "status_col": 13,
-        "removal_col": 14,
-        "checked_col": 15,
-        "start_row": 2,
+        "URL_COL": 6,   # F
+        "STATUS_COL": 13,  # M
+        "REMOVAL_DATE_COL": 14,  # N
+        "LAST_CHECKED_COL": 15,  # O
     },
     "fb_rm": {
         "sheet_id": "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY",
         "tabs": ["Facebook RM Archives"],
-        "url_col": 10,   # J
-        "status_col": 15, # O
-        "removal_col": 16,# P
-        "checked_col": 17,# Q
-        "start_row": 2,
+        "URL_COL": 10,  # J
+        "STATUS_COL": 15,  # O
+        "REMOVAL_DATE_COL": 16,  # P
+        "LAST_CHECKED_COL": 17,  # Q
     },
     "ig_rm": {
         "sheet_id": "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY",
         "tabs": ["Instagram RM Archives"],
-        "url_col": 10,   # J
-        "status_col": 15, # O
-        "removal_col": 16,# P
-        "checked_col": 17,# Q
-        "start_row": 2,
+        "URL_COL": 10,  # J
+        "STATUS_COL": 15,  # O
+        "REMOVAL_DATE_COL": 16,  # P
+        "LAST_CHECKED_COL": 17,  # Q
     },
 }
 
-# Behavior
+# ------------ Behavior ------------
+START_ROW = 2
 SKIP_STATUS_VALUES = {"removed"}
 DELAY_RANGE = (4.0, 7.0)
 FLUSH_EVERY = 250
 
-# Browser timing
+# ------------ Browser timing ------------
 NAV_TIMEOUT_MS = 15000
 NETWORK_IDLE_MS = 7000
 SETTLE_SLEEP_S = 2.0
 
-# User agents
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
-SAFARI_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15"
-)
-CHROME_UA = USER_AGENT
 
-# Removal text fingerprints
+# ------------ Text fingerprints ------------
 INST_REMOVAL_PHRASES = [
     "sorry, this page isn't available",
     "the link you followed may be broken",
     "page not found",
 ]
-
-YT_REMOVAL = [
-    "video unavailable",
-    "this video isn't available anymore",
-]
-
-TT_REMOVAL = [
-    "video currently unavailable",
-]
-
-FB_REMOVAL = [
-    "this content isn't available right now",
-    "this content isn't available anymore",
-    "the link you followed may be broken",
-    "may have been removed",
-    "we're sorry, this content isn't available",
-    "this video isn't available anymore",
-]
-
+YT_REMOVAL = ["video unavailable", "this video isn't available anymore"]
+TT_REMOVAL = ["video currently unavailable"]
+FB_REMOVAL = ["this content isn't available right now", "this video isn't available anymore"]
 THREADS_UNAVAILABLE_BADGE = "post unavailable"
+LOGIN_CUES = ["log in", "sign up", "/accounts/login", "login.facebook", "log in to facebook"]
 
-LOGIN_CUES = [
-    "log in",
-    "sign up",
-    "/accounts/login",
-    "login.facebook",
-    "log in to facebook",
-]
 
-# ----------------- Sheets auth -----------------
+# ==================== Sheets auth ====================
 def make_gspread_client():
     scope = [
         "https://spreadsheets.google.com/feeds",
@@ -130,7 +99,8 @@ def make_gspread_client():
             )
     raise RuntimeError("Could not load Google credentials from env or credentials.json")
 
-# ----------------- Helpers -----------------
+
+# ==================== Helpers ====================
 def normalize_url(u: str) -> str:
     return (u or "").strip()
 
@@ -161,7 +131,7 @@ def contains_any(haystack: str, needles) -> bool:
     return any(n in haystack for n in needles)
 
 def looks_like_login(body: str, url_now: str) -> bool:
-    return ("/accounts/login" in (url_now or "")) or contains_any(body or "", LOGIN_CUES)
+    return ("/login" in (url_now or "")) or contains_any(body or "", LOGIN_CUES)
 
 def parse_mmddyyyy(s: str):
     try:
@@ -180,120 +150,81 @@ def recent_enough(last_str: str, skip_days: int) -> bool:
 def _attr(page, sel, attr):
     try:
         el = page.query_selector(sel)
-        return (el.get_attribute(attr) or "").strip()
+        if el:
+            return el.get_attribute(attr) or ""
     except Exception:
-        return ""
+        pass
+    return ""
+
+def _canonical_url(page) -> str:
+    return (_attr(page, 'link[rel="canonical"]', "href") or "").lower()
 
 def _jsonld_video_present(page) -> bool:
     try:
         for el in page.query_selector_all('script[type="application/ld+json"]'):
-            txt = (el.inner_text() or "").strip()
-            if not txt:
-                continue
-            data = json.loads(txt)
-            items = data if isinstance(data, list) else [data]
-            for it in items:
-                if (it.get("@type") or "").lower() == "videoobject":
-                    return True
-    except Exception:
-        pass
-    return False
-
-# ----------------- FB engine probe -----------------
-def fb_probe(engine: str, url: str, timeout_ms=NAV_TIMEOUT_MS, idle_ms=NETWORK_IDLE_MS):
-    from playwright.sync_api import sync_playwright
-    final_url = ""
-    body = ""
-    og_video = False
-    jsonld_video = False
-    canonical = ""
-
-    def _attr_local(pg, sel, attr):
-        try:
-            el = pg.query_selector(sel)
-            return (el.get_attribute(attr) or "").strip()
-        except Exception:
-            return ""
-
-    def _jsonld_has_video(pg) -> bool:
-        try:
-            for el in pg.query_selector_all('script[type="application/ld+json"]'):
-                import json as _j
-                txt = (el.inner_text() or "").strip()
-                if not txt:
-                    continue
-                data = _j.loads(txt)
-                items = data if isinstance(data, list) else [data]
-                for it in items:
-                    if (it.get("@type") or "").lower() == "videoobject":
-                        return True
-        except Exception:
-            pass
-        return False
-
-    with sync_playwright() as p:
-        br = (p.chromium if engine == "chromium" else p.webkit).launch(headless=True)
-        ua = CHROME_UA if engine == "chromium" else SAFARI_UA
-        ctx = br.new_context(user_agent=ua)
-        pg = ctx.new_page()
-        try:
-            pg.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            try:
-                pg.wait_for_load_state("networkidle", timeout=idle_ms)
-            except Exception:
-                pass
-            time.sleep(SETTLE_SLEEP_S)
-            final_url = (pg.url or "").lower()
-            body = (pg.content() or "").lower()
-            og_video = bool(_attr_local(pg, 'meta[property="og:video"]', "content"))
-            jsonld_video = _jsonld_has_video(pg)
-            canonical = (_attr_local(pg, 'link[rel="canonical"]', "href") or "").lower()
-        finally:
-            ctx.close()
-            br.close()
-
-    return final_url, body, og_video, jsonld_video, canonical
-
-# ----------------- FB helpers for URL inference -----------------
-def _fb_watch_missing_v(u: str) -> bool:
-    try:
-        p = urlparse((u or "").lower())
-        return p.path.rstrip("/") == "/watch" and "v" not in parse_qs(p.query)
-    except Exception:
-        return False
-
-def _fb_reel_missing_id(u: str) -> bool:
-    try:
-        p = urlparse((u or "").lower())
-        parts = [x for x in p.path.split("/") if x]
-        if p.path.rstrip("/") == "/reel":
-            return True
-        if len(parts) >= 2 and parts[0] == "reel":
-            return not parts[1].isdigit()
+            txt = (el.inner_text() or "").lower()
+            if '"videoobject"' in txt or '"contenturl"' in txt or '"embedurl"' in txt:
+                return True
     except Exception:
         pass
     return False
 
 def _canonical_says_no_media(page) -> bool:
-    href = (_attr(page, 'link[rel="canonical"]', "href") or "").lower()
-    if not href:
-        return False
-    if "/watch" in href:
-        return ("?v=" not in href)
-    if "/reel/" in href:
-        parts = [x for x in urlparse(href).path.split("/") if x]
-        return not (len(parts) >= 2 and parts[0] == "reel" and parts[1].isdigit())
-    return False
+    can = _canonical_url(page)
+    # If canonical collapses to /watch/ without ?v= or to a non-reel/non-video page, suspect removed
+    return ("/watch" in can and "?v=" not in can) or ("/reel/" in can and can.rstrip("/").endswith("/reel"))
 
-# ----------------- Per-platform checkers -----------------
+def _fb_watch_missing_v(u: str) -> bool:
+    return "/watch" in u and "?v=" not in u
+
+def _fb_reel_missing_id(u: str) -> bool:
+    if "/reel/" not in u:
+        return False
+    try:
+        tail = u.split("/reel/", 1)[1].split("?", 1)[0].strip("/")
+        return not tail or not tail[0].isdigit()
+    except Exception:
+        return False
+
+def fb_probe(p, engine: str, url: str):
+    if engine == "chromium":
+        br = p.chromium.launch(headless=True)
+    elif engine == "webkit":
+        br = p.webkit.launch(headless=True)
+    else:
+        br = p.chromium.launch(headless=True)
+    ctx = br.new_context(user_agent=USER_AGENT)
+    pg = ctx.new_page()
+    try:
+        try:
+            pg.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except PWTimeout:
+            pg.goto(url, wait_until="networkidle")
+        try:
+            pg.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
+        except Exception:
+            pass
+        time.sleep(SETTLE_SLEEP_S)
+        final_url = (pg.url or "").lower()
+        body = page_text(pg)
+        og = bool(_attr(pg, 'meta[property="og:video"]', "content"))
+        jd = _jsonld_video_present(pg)
+        can = _canonical_url(pg)
+        return final_url, body, og, jd, can
+    finally:
+        ctx.close()
+        br.close()
+
+
+# ==================== Per-platform checkers ====================
 def check_instagram(page, url: str) -> str:
     page.set_default_navigation_timeout(NAV_TIMEOUT_MS)
     page.set_default_timeout(NAV_TIMEOUT_MS)
     try:
-        resp = page.goto(url, wait_until="domcontentloaded")
+        page.goto(url, wait_until="domcontentloaded")
     except PWTimeout:
         try:
-            resp = page.goto(url, wait_until="networkidle")
+            page.goto(url, wait_until="networkidle")
         except Exception:
             return "unknown"
     except Exception:
@@ -303,6 +234,7 @@ def check_instagram(page, url: str) -> str:
     except Exception:
         pass
     time.sleep(SETTLE_SLEEP_S)
+
     body = page_text(page)
     cur_url = page.url
     if contains_any(body, [p.lower() for p in INST_REMOVAL_PHRASES]):
@@ -344,61 +276,6 @@ def check_tiktok(page, url: str) -> str:
         return "active"
     return "unknown"
 
-def check_facebook(page, url: str) -> str:
-    try:
-        resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-    except Exception:
-        return "unknown"
-
-    try:
-        page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
-    except Exception:
-        pass
-    time.sleep(SETTLE_SLEEP_S)
-
-    final_url = (page.url or "").lower()
-    body = page_text(page)
-    og_video = bool(_attr(page, 'meta[property="og:video"]', "content"))
-    jsonld_has_video = _jsonld_video_present(page)
-
-    if contains_any(body, [x.lower() for x in FB_REMOVAL]):
-        if not og_video and not jsonld_has_video and _canonical_says_no_media(page):
-            return "removed"
-
-    if _fb_watch_missing_v(final_url) or _fb_reel_missing_id(final_url):
-        return "removed"
-
-    if _canonical_says_no_media(page) and not og_video and not jsonld_has_video:
-        return "removed"
-
-    looks_login = looks_like_login(body, final_url)
-    path = urlparse(url).path.lower()
-
-    if looks_login:
-        try:
-            if path.startswith("/watch"):
-                f2, b2, og2, jd2, can2 = fb_probe("chromium", url)
-            else:
-                f2, b2, og2, jd2, can2 = fb_probe("webkit", url)
-
-            if contains_any(b2, [x.lower() for x in FB_REMOVAL]) and not og2 and not jd2:
-                if ("/watch" in can2 and "?v=" not in can2) or _fb_reel_missing_id(can2) or _fb_watch_missing_v(f2):
-                    return "removed"
-        except Exception:
-            pass
-
-    if og_video or jsonld_has_video or "?v=" in final_url or "/reel/" in final_url:
-        return "active"
-
-    try:
-        code = resp.status if resp else 0
-        if code and 200 <= code < 400:
-            return "active"
-    except Exception:
-        pass
-
-    return "unknown"
-
 def check_threads(page, url: str) -> str:
     try:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
@@ -417,7 +294,62 @@ def check_threads(page, url: str) -> str:
         return "active"
     return "unknown"
 
-def check_one(page, url: str) -> str:
+def check_facebook(page, url: str, pw) -> str:
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception:
+        return "unknown"
+    try:
+        page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
+    except Exception:
+        pass
+    time.sleep(SETTLE_SLEEP_S)
+
+    final_url = (page.url or "").lower()
+    body = page_text(page)
+
+    og_video = bool(_attr(page, 'meta[property="og:video"]', "content"))
+    jsonld_has_video = _jsonld_video_present(page)
+
+    # Removal banner visible and no media → removed
+    if contains_any(body, [x.lower() for x in FB_REMOVAL]) and not og_video and not jsonld_has_video:
+        return "removed"
+
+    # URL or canonical heuristics
+    if _fb_watch_missing_v(final_url) or _fb_reel_missing_id(final_url):
+        return "removed"
+    if _canonical_says_no_media(page) and not og_video and not jsonld_has_video:
+        return "removed"
+
+    # Login wall probe: pick engine based on path
+    if looks_like_login(body, final_url):
+        try:
+            path = urlparse(url).path.lower()
+            if path.startswith("/watch"):
+                f2, b2, og2, jd2, can2 = fb_probe(pw, "chromium", url)
+            else:
+                f2, b2, og2, jd2, can2 = fb_probe(pw, "webkit", url)
+
+            if contains_any(b2, [x.lower() for x in FB_REMOVAL]) and not og2 and not jd2:
+                if ("/watch" in can2 and "?v=" not in can2) or _fb_reel_missing_id(can2) or _fb_watch_missing_v(f2):
+                    return "removed"
+                return "removed"
+        except Exception:
+            pass
+
+    if og_video or jsonld_has_video or "?v=" in final_url or "/reel/" in final_url:
+        return "active"
+
+    try:
+        code = resp.status if resp else 0
+        if code and 200 <= code < 400:
+            return "active"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def check_one(page, url: str, pw) -> str:
     p = host_platform(url)
     if p == "instagram":
         return check_instagram(page, url)
@@ -426,7 +358,7 @@ def check_one(page, url: str) -> str:
     if p == "tiktok":
         return check_tiktok(page, url)
     if p == "facebook":
-        return check_facebook(page, url)
+        return check_facebook(page, url, pw)
     if p == "threads":
         return check_threads(page, url)
     try:
@@ -436,19 +368,19 @@ def check_one(page, url: str) -> str:
     except Exception:
         return "unknown"
 
-# ----------------- Runner -----------------
-def run_sheet(gc, cfg, page):
+
+# ==================== Runner ====================
+def run_sheet(gc, cfg, pw, shared_browser=None):
     ws = gc.open_by_key(cfg["sheet_id"]).worksheet(cfg["tabs"][0])
     values = ws.get_all_values()
     if not values:
         print("No data.")
         return
 
-    URL_COL = cfg["url_col"]
-    STATUS_COL = cfg["status_col"]
-    REMOVAL_DATE_COL = cfg["removal_col"]
-    LAST_CHECKED_COL = cfg["checked_col"]
-    START_ROW = cfg["start_row"]
+    URL_COL = cfg["URL_COL"]
+    STATUS_COL = cfg["STATUS_COL"]
+    REMOVAL_DATE_COL = cfg["REMOVAL_DATE_COL"]
+    LAST_CHECKED_COL = cfg["LAST_CHECKED_COL"]
 
     SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
     TOTAL_SHARDS = int(os.getenv("TOTAL_SHARDS", "1"))
@@ -463,6 +395,11 @@ def run_sheet(gc, cfg, page):
             ws.batch_update(updates)
             updates = []
 
+    browser = shared_browser or pw.chromium.launch(headless=True)
+    context = browser.new_context(user_agent=USER_AGENT)
+    page = context.new_page()
+
+    print(f"=== Running: {cfg['sheet_id']} / {cfg['tabs'][0]} ===")
     for i in range(START_ROW - 1, len(values)):
         row_idx = i + 1
         if (i % TOTAL_SHARDS) != SHARD_INDEX:
@@ -483,7 +420,7 @@ def run_sheet(gc, cfg, page):
             continue
 
         print(f"🔎 Checking row {row_idx}: {url}")
-        result = check_one(page, url)
+        result = check_one(page, url, pw)
 
         removal_date = today if result == "removed" else ""
         last_checked = today
@@ -500,26 +437,11 @@ def run_sheet(gc, cfg, page):
         print(f"   → {result} | sleeping {sleep_for:.1f}s")
         time.sleep(sleep_for)
 
+    context.close()
+    if not shared_browser:
+        browser.close()
     flush()
 
-def main():
-    SHEET_PICK = os.getenv("SHEET_TO_RUN", "primary").strip()
-    cfg = SHEETS.get(SHEET_PICK)
-    if not cfg:
-        raise RuntimeError(f"Unknown SHEET_TO_RUN: {SHEET_PICK}")
-
-    gc = make_gspread_client()
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=USER_AGENT)
-        page = context.new_page()
-
-        print(f"=== Running: {cfg['sheet_id']} / {cfg['tabs'][0]} ===")
-        run_sheet(gc, cfg, page)
-
-        browser.close()
-    print("✅ Done.")
 
 def col_letter(n: int) -> str:
     s = ""
@@ -527,6 +449,20 @@ def col_letter(n: int) -> str:
         n, r = divmod(n - 1, 26)
         s = chr(65 + r) + s
     return s
+
+
+def main():
+    sheet_key = (os.getenv("SHEET_TO_RUN") or "primary").strip().lower()
+    if sheet_key not in SHEETS:
+        sheet_key = "primary"
+    cfg = SHEETS[sheet_key]
+
+    gc = make_gspread_client()
+
+    with sync_playwright() as p:
+        # Base Chromium installed by Actions; WebKit is installed in workflow
+        run_sheet(gc, cfg, p)
+
 
 if __name__ == "__main__":
     main()
