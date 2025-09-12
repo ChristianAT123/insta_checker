@@ -86,7 +86,7 @@ jobs:
           SHARDS=""
           for ((i=0;i<TOTAL;i++)); do
             [[ -n "$SHARDS" ]] && SHARDS="$SHARDS,"
-            SHARDS="$SHARDS{\"sheet\":\"$SHEET\",\"shard\":$i}"
+            SHARDS="$SHARDS{\"sheet\":\"$SHEET\",\"shard\":${i}}"
           done
           echo "matrix={\"include\":[$SHARDS]}" >> "$GITHUB_OUTPUT"
           echo "total=$TOTAL" >> "$GITHUB_OUTPUT"

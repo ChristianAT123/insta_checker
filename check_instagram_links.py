@@ -298,7 +298,7 @@ def check_threads(page, url: str) -> str:
 def check_one(page_chromium, page_webkit, url: str) -> str:
     p = host_platform(url)
     if p == "instagram":
-        return check_instagram(page_webkit, url)
+        return check_instagram(page_webkit, url)  # WebKit/Safari for IG
     if p == "youtube":
         return check_youtube(page_chromium, url)
     if p == "tiktok":
@@ -323,12 +323,10 @@ def col_letter(n: int) -> str:
 
 def get_worksheet_by_title(gc, sheet_id: str, desired_titles):
     sh = gc.open_by_key(sheet_id)
-    titles = [ws.title for ws in sh.worksheets()]
     want_norms = [t.strip().casefold() for t in desired_titles]
     for ws in sh.worksheets():
         if ws.title.strip().casefold() in want_norms:
             return ws
-    # fallback: first tab if not found
     return sh.worksheets()[0]
 
 def run_sheet(gc, cfg, page_chromium, page_webkit):
