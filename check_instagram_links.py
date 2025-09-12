@@ -1,8 +1,8 @@
+# check_instagram_links.py
 import os
 import json
 import time
 import random
-import re
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
 
@@ -10,53 +10,45 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+# ---------- Sheets config (3 targets) ----------
 SHEETS = {
     "primary": {
         "sheet_id": "1sPsWqoEqd1YmD752fuz7j1K3VSGggpzlkc_Tp7Pr4jQ",
         "tabs": ["Logs"],
-        "url_col": 6,
-        "status_col": 13,
-        "removal_col": 14,
-        "checked_col": 15,
+        "url_col": 6,     # F
+        "status_col": 13, # M
+        "removal_col": 14,# N
+        "checked_col": 15,# O
         "start_row": 2,
     },
     "fb_rm": {
         "sheet_id": "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY",
-        "tabs": [
-            "Facebook RM Archives",
-            "Facebook RM Archive",
-            "Facebook RM",
-            "FacebookRMArchives",      # renamed
-        ],
-        "url_col": 10,
-        "status_col": 15,
-        "removal_col": 16,
-        "checked_col": 17,
+        "tabs": ["FacebookRMArchives"],  # exact title
+        "url_col": 10,   # J
+        "status_col": 15,# O
+        "removal_col": 16,# P
+        "checked_col": 17,# Q
         "start_row": 2,
     },
     "ig_rm": {
         "sheet_id": "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY",
-        "tabs": [
-            "Instagram RM Archives",
-            "Instagram RM Archive",
-            "Instagram RM",
-            "InstagramRMArchives",     # renamed
-        ],
-        "url_col": 10,
-        "status_col": 15,
-        "removal_col": 16,
-        "checked_col": 17,
+        "tabs": ["InstagramRMArchives"],  # exact title
+        "url_col": 10,   # J
+        "status_col": 15,# O
+        "removal_col": 16,# P
+        "checked_col": 17,# Q
         "start_row": 2,
     },
 }
 
+# ---------- Behavior / timing ----------
 DELAY_RANGE = (4.0, 7.0)
 NAV_TIMEOUT_MS = 15000
 NETWORK_IDLE_MS = 7000
 SETTLE_SLEEP_S = 2.0
 FLUSH_EVERY = 250
 SKIP_STATUS_VALUES = {"removed"}
-MAX_PER_LINK_S = 45.0  # was 35s
+MAX_PER_LINK_S = 35.0
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -64,6 +56,7 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# ---------- Removal fingerprints ----------
 INST_REMOVAL_PHRASES = [
     "sorry, this page isn't available",
     "the link you followed may be broken",
@@ -96,6 +89,7 @@ LOGIN_CUES = [
     "log in to facebook",
 ]
 
+# ---------- Auth ----------
 def make_gspread_client():
     scope = [
         "https://spreadsheets.google.com/feeds",
@@ -126,6 +120,7 @@ def make_gspread_client():
             )
     raise RuntimeError("Could not load Google credentials")
 
+# ---------- Helpers ----------
 def normalize_url(u: str) -> str:
     s = (u or "").strip()
     if not s:
@@ -165,7 +160,7 @@ def host_platform(u: str) -> str:
     return "unknown"
 
 def contains_any(haystack: str, needles) -> bool:
-    return any(n in haystack for n in needles)
+    return any(n in (haystack or "") for n in needles)
 
 def looks_like_login(body: str, url_now: str) -> bool:
     return ("/accounts/login" in (url_now or "")) or contains_any(body or "", LOGIN_CUES)
@@ -184,27 +179,7 @@ def recent_enough(last_str: str, skip_days: int) -> bool:
         return False
     return (datetime.now() - d) < timedelta(days=skip_days)
 
-def dismiss_fb_login_modal(page):
-    try:
-        btn = page.query_selector('div[role="dialog"] [aria-label="Close"], [aria-label="Close"]')
-        if btn:
-            btn.click()
-            time.sleep(0.5)
-    except Exception:
-        pass
-    try:
-        page.evaluate("""
-            (() => {
-              const dialogs = document.querySelectorAll('div[role="dialog"]');
-              dialogs.forEach(d => d.remove());
-              const overlays = document.querySelectorAll('[data-visualcompletion="ignore-dynamic"]');
-              overlays.forEach(o => { if (getComputedStyle(o).position === 'fixed') o.remove(); });
-            })();
-        """)
-        time.sleep(0.5)
-    except Exception:
-        pass
-
+# ---------- Per-platform ----------
 def check_instagram(page, url: str) -> str:
     page.set_default_navigation_timeout(NAV_TIMEOUT_MS)
     page.set_default_timeout(NAV_TIMEOUT_MS)
@@ -222,16 +197,12 @@ def check_instagram(page, url: str) -> str:
     except Exception:
         pass
     time.sleep(SETTLE_SLEEP_S)
-
     body = page_text(page)
     cur_url = page.url or ""
-
     if contains_any(body, [p.lower() for p in INST_REMOVAL_PHRASES]):
         return "removed"
-
     if looks_like_login(body, cur_url):
         return "active"
-
     try:
         if page.query_selector("article, video, div[role='dialog']"):
             return "active"
@@ -267,6 +238,27 @@ def check_tiktok(page, url: str) -> str:
         return "active"
     return "unknown"
 
+def dismiss_fb_login_modal(page):
+    try:
+        btn = page.query_selector('div[role="dialog"] [aria-label="Close"], [aria-label="Close"]')
+        if btn:
+            btn.click()
+            time.sleep(0.5)
+    except Exception:
+        pass
+    try:
+        page.evaluate("""
+            (() => {
+              const dialogs = document.querySelectorAll('div[role="dialog"]');
+              dialogs.forEach(d => d.remove());
+              const overlays = document.querySelectorAll('[data-visualcompletion="ignore-dynamic"]');
+              overlays.forEach(o => { if (getComputedStyle(o).position === 'fixed') o.remove(); });
+            })();
+        """)
+        time.sleep(0.5)
+    except Exception:
+        pass
+
 def check_facebook(page, url: str) -> str:
     try:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
@@ -282,10 +274,9 @@ def check_facebook(page, url: str) -> str:
 
     body = page_text(page)
     cur_url = (page.url or "").lower()
-
     if contains_any(body, [x.lower() for x in FB_REMOVAL]):
         return "removed"
-
+    # Watch without ?v= id → typically removed
     if "facebook.com/watch/" in cur_url and "v=" not in cur_url:
         return "removed"
 
@@ -318,7 +309,7 @@ def check_threads(page, url: str) -> str:
 def check_one(page_chromium, page_webkit, url: str) -> str:
     p = host_platform(url)
     if p == "instagram":
-        return check_instagram(page_webkit, url)
+        return check_instagram(page_webkit, url)   # use Safari/WebKit for IG
     if p == "youtube":
         return check_youtube(page_chromium, url)
     if p == "tiktok":
@@ -334,6 +325,7 @@ def check_one(page_chromium, page_webkit, url: str) -> str:
     except Exception:
         return "unknown"
 
+# ---------- Sheet utils ----------
 def col_letter(n: int) -> str:
     s = ""
     while n > 0:
@@ -341,38 +333,20 @@ def col_letter(n: int) -> str:
         s = chr(65 + r) + s
     return s
 
-def _norm_title(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (s or "").strip().casefold())
-
 def get_worksheet_by_title(gc, sheet_id: str, desired_titles):
     sh = gc.open_by_key(sheet_id)
-    want_norms = {_norm_title(t) for t in desired_titles}
-    chosen = None
+    want_norms = [t.strip().casefold() for t in desired_titles]
     for ws in sh.worksheets():
-        if _norm_title(ws.title) in want_norms:
-            chosen = ws
-            break
-    if not chosen:
-        tokens = set()
-        for t in want_norms:
-            for chunk in re.findall(r"[a-z]+", t):
-                tokens.add(chunk)
-        for ws in sh.worksheets():
-            norm = _norm_title(ws.title)
-            if any(tok in norm for tok in tokens):
-                chosen = ws
-                break
-    if not chosen:
-        chosen = sh.worksheets()[0]
-    return chosen
+        if ws.title.strip().casefold() in want_norms:
+            return ws
+    # fallback: first tab if not found
+    return sh.worksheets()[0]
 
+# ---------- Runner ----------
 def run_sheet(gc, cfg, page_chromium, page_webkit):
     ws = get_worksheet_by_title(gc, cfg["sheet_id"], cfg["tabs"])
     values = ws.get_all_values()
-    total_rows = len(values)
-    print(f"→ Using tab: '{ws.title}' with {total_rows} rows")
-    if not values or total_rows <= (cfg['start_row'] - 1):
-        print("No data rows to process.")
+    if not values:
         return
 
     URL_COL = cfg["url_col"]
@@ -382,7 +356,7 @@ def run_sheet(gc, cfg, page_chromium, page_webkit):
     START_ROW = cfg["start_row"]
 
     SHARD_INDEX = int(os.getenv("SHARD_INDEX", "0"))
-    TOTAL_SHARDS = max(1, int(os.getenv("TOTAL_SHARDS", "1")))
+    TOTAL_SHARDS = int(os.getenv("TOTAL_SHARDS", "1"))
     SKIP_RECENT_DAYS = int(os.getenv("SKIP_RECENT_DAYS", "0"))
 
     today = datetime.now().strftime("%m/%d/%Y")
@@ -394,7 +368,7 @@ def run_sheet(gc, cfg, page_chromium, page_webkit):
             ws.batch_update(updates)
             updates = []
 
-    for i in range(START_ROW - 1, total_rows):
+    for i in range(START_ROW - 1, len(values)):
         row_idx = i + 1
         if (i % TOTAL_SHARDS) != SHARD_INDEX:
             continue
@@ -421,17 +395,17 @@ def run_sheet(gc, cfg, page_chromium, page_webkit):
             result = check_one(page_chromium, page_webkit, url)
         except Exception:
             result = "unknown"
-        elapsed = time.monotonic() - started
 
-        if elapsed > MAX_PER_LINK_S:
-            print(f"⚠️  Watchdog: row {row_idx} took {elapsed:.1f}s — marking Unknown and continuing.")
-            result = "unknown"
-            # soft reset pages to avoid lingering states
-            for p in (page_chromium, page_webkit):
-                try:
-                    p.goto("about:blank", timeout=2000)
-                except Exception:
-                    pass
+        if time.monotonic() - started > MAX_PER_LINK_S:
+            try:
+                page_chromium.close()
+            except Exception:
+                pass
+            try:
+                page_webkit.close()
+            except Exception:
+                pass
+            raise RuntimeError("Per-link watchdog tripped")
 
         removal_date = today if result == "removed" else ""
         last_checked = today
