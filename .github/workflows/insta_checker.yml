@@ -1,3 +1,4 @@
+# .github/workflows/insta_checker.yml
 name: Insta Checker
 
 on:
@@ -75,7 +76,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     outputs:
-      shards: ${{ steps.gen.outputs.shards }}
+      matrix: ${{ steps.gen.outputs.matrix }}
       total:  ${{ steps.gen.outputs.total }}
       skip:   ${{ steps.gen.outputs.skip }}
       sheet:  ${{ steps.gen.outputs.sheet }}
@@ -88,8 +89,13 @@ jobs:
           TOTAL="${{ github.event.inputs.total_shards || '8' }}"
           SKIP="${{ github.event.inputs.skip_recent_days || '0' }}"
           if ! [[ "$TOTAL" =~ ^[0-9]+$ && "$TOTAL" -ge 1 ]]; then TOTAL=8; fi
-          shards_csv="$(seq 0 $((TOTAL-1)) | paste -sd, -)"
-          echo "shards=[$shards_csv]" >> "$GITHUB_OUTPUT"
+          # build include matrix as JSON manually (no python/heredoc)
+          shards=""
+          for ((i=0;i<TOTAL;i++)); do
+            [ -n "$shards" ] && shards="$shards,"
+            shards="$shards{\"sheet\":\"$SHEET\",\"shard\":$i}"
+          done
+          echo "matrix={\"include\":[${shards}]}" >> "$GITHUB_OUTPUT"
           echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
           echo "sheet=$SHEET" >> "$GITHUB_OUTPUT"
@@ -100,10 +106,9 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
-      matrix:
-        shard: ${{ fromJSON(needs.prepare-manual.outputs.shards) }}
+      matrix: ${{ fromJSON(needs.prepare-manual.outputs.matrix) }}
     env:
-      SHEET_NAME: ${{ needs.prepare-manual.outputs.sheet }}
+      SHEET_NAME: ${{ matrix.sheet }}
       SHARD_INDEX: ${{ matrix.shard }}
       TOTAL_SHARDS: ${{ needs.prepare-manual.outputs.total }}
       SKIP_RECENT_DAYS: ${{ needs.prepare-manual.outputs.skip }}
