@@ -75,12 +75,12 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     outputs:
-      matrix: ${{ steps.gen.outputs.matrix }}
-      total:  ${{ steps.gen.outputs.total }}
-      skip:   ${{ steps.gen.outputs.skip }}
-      sheet:  ${{ steps.gen.outputs.sheet }}
+      matrix: ${{ steps.mk.outputs.matrix }}
+      total:  ${{ steps.mk.outputs.total }}
+      skip:   ${{ steps.mk.outputs.skip }}
+      sheet:  ${{ steps.mk.outputs.sheet }}
     steps:
-      - id: gen
+      - id: mk
         shell: bash
         run: |
           set -euo pipefail
@@ -88,23 +88,21 @@ jobs:
           TOTAL="${{ github.event.inputs.total_shards || '8' }}"
           SKIP="${{ github.event.inputs.skip_recent_days || '0' }}"
 
-          if ! [[ "$TOTAL" =~ ^[0-9]+$ && "$TOTAL" -ge 1 ]]; then TOTAL=8; fi
+          [[ "$TOTAL" =~ ^[0-9]+$ ]] || TOTAL=8
+          (( TOTAL >= 1 )) || TOTAL=8
 
-          json='{"include":['
-          first=1
-          for sh in $(seq 0 $((TOTAL-1))); do
-            if [[ $first -eq 0 ]]; then json+=','; fi
-            json+='{"sheet":"'"$SHEET"'","shard":'"$sh"'}'
-            first=0
+          inc=''
+          for ((i=0;i<TOTAL;i++)); do
+            [[ -n "$inc" ]] && inc="$inc,"
+            inc="$inc"{\"sheet\":\"$SHEET\",\"shard\":$i}
           done
-          json+=']}'
-
-          echo "matrix=$json" >> "$GITHUB_OUTPUT"
-          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
-          echo "skip=$SKIP"   >> "$GITHUB_OUTPUT"
-          echo "sheet=$SHEET" >> "$GITHUB_OUTPUT"
-
-          echo "Generated matrix: $json"
+          MATRIX="{\"include\":[${inc}]}"
+          {
+            echo "matrix=$MATRIX"
+            echo "total=$TOTAL"
+            echo "skip=$SKIP"
+            echo "sheet=$SHEET"
+          } >> "$GITHUB_OUTPUT"
 
   manual:
     if: github.event_name == 'workflow_dispatch'
