@@ -42,7 +42,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install --upgrade "playwright>=1.47.1"
-          playwright install --with-deps chromium webkit
+          playwright install --with-deps chromium
       - name: Write Google credentials
         env:
           RAW_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
@@ -115,7 +115,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install --upgrade "playwright>=1.47.1"
-          playwright install --with-deps chromium webkit
+          playwright install --with-deps chromium
       - name: Write Google credentials
         env:
           RAW_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}

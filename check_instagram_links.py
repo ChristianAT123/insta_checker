@@ -1,4 +1,3 @@
-# check_instagram_links.py
 import os
 import json
 import time
@@ -10,45 +9,43 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ---------- Sheets config (3 targets) ----------
 SHEETS = {
     "primary": {
         "sheet_id": "1sPsWqoEqd1YmD752fuz7j1K3VSGggpzlkc_Tp7Pr4jQ",
         "tabs": ["Logs"],
-        "url_col": 6,     # F
-        "status_col": 13, # M
-        "removal_col": 14,# N
-        "checked_col": 15,# O
+        "url_col": 6,
+        "status_col": 13,
+        "removal_col": 14,
+        "checked_col": 15,
         "start_row": 2,
     },
     "fb_rm": {
         "sheet_id": "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY",
-        "tabs": ["FacebookRMArchives"],  # exact title
-        "url_col": 10,   # J
-        "status_col": 15,# O
-        "removal_col": 16,# P
-        "checked_col": 17,# Q
+        "tabs": ["FacebookRMArchives"],
+        "url_col": 10,
+        "status_col": 15,
+        "removal_col": 16,
+        "checked_col": 17,
         "start_row": 2,
     },
     "ig_rm": {
         "sheet_id": "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY",
-        "tabs": ["InstagramRMArchives"],  # exact title
-        "url_col": 10,   # J
-        "status_col": 15,# O
-        "removal_col": 16,# P
-        "checked_col": 17,# Q
+        "tabs": ["InstagramRMArchives"],
+        "url_col": 10,
+        "status_col": 15,
+        "removal_col": 16,
+        "checked_col": 17,
         "start_row": 2,
     },
 }
 
-# ---------- Behavior / timing ----------
 DELAY_RANGE = (4.0, 7.0)
 NAV_TIMEOUT_MS = 15000
 NETWORK_IDLE_MS = 7000
 SETTLE_SLEEP_S = 2.0
 FLUSH_EVERY = 250
 SKIP_STATUS_VALUES = {"removed"}
-MAX_PER_LINK_S = 35.0
+MAX_PER_LINK_S = 60.0
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -56,7 +53,6 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-# ---------- Removal fingerprints ----------
 INST_REMOVAL_PHRASES = [
     "sorry, this page isn't available",
     "the link you followed may be broken",
@@ -89,7 +85,6 @@ LOGIN_CUES = [
     "log in to facebook",
 ]
 
-# ---------- Auth ----------
 def make_gspread_client():
     scope = [
         "https://spreadsheets.google.com/feeds",
@@ -120,7 +115,6 @@ def make_gspread_client():
             )
     raise RuntimeError("Could not load Google credentials")
 
-# ---------- Helpers ----------
 def normalize_url(u: str) -> str:
     s = (u or "").strip()
     if not s:
@@ -160,7 +154,7 @@ def host_platform(u: str) -> str:
     return "unknown"
 
 def contains_any(haystack: str, needles) -> bool:
-    return any(n in (haystack or "") for n in needles)
+    return any(n in haystack for n in needles)
 
 def looks_like_login(body: str, url_now: str) -> bool:
     return ("/accounts/login" in (url_now or "")) or contains_any(body or "", LOGIN_CUES)
@@ -179,7 +173,6 @@ def recent_enough(last_str: str, skip_days: int) -> bool:
         return False
     return (datetime.now() - d) < timedelta(days=skip_days)
 
-# ---------- Per-platform ----------
 def check_instagram(page, url: str) -> str:
     page.set_default_navigation_timeout(NAV_TIMEOUT_MS)
     page.set_default_timeout(NAV_TIMEOUT_MS)
@@ -269,17 +262,13 @@ def check_facebook(page, url: str) -> str:
     except Exception:
         pass
     time.sleep(SETTLE_SLEEP_S)
-
     dismiss_fb_login_modal(page)
-
     body = page_text(page)
     cur_url = (page.url or "").lower()
     if contains_any(body, [x.lower() for x in FB_REMOVAL]):
         return "removed"
-    # Watch without ?v= id → typically removed
     if "facebook.com/watch/" in cur_url and "v=" not in cur_url:
         return "removed"
-
     code = resp.status if resp else 0
     if code and 200 <= code < 400:
         return "active"
@@ -306,10 +295,10 @@ def check_threads(page, url: str) -> str:
         return "active"
     return "unknown"
 
-def check_one(page_chromium, page_webkit, url: str) -> str:
+def check_one(page_chromium, url: str) -> str:
     p = host_platform(url)
     if p == "instagram":
-        return check_instagram(page_webkit, url)   # use Safari/WebKit for IG
+        return check_instagram(page_chromium, url)
     if p == "youtube":
         return check_youtube(page_chromium, url)
     if p == "tiktok":
@@ -325,7 +314,6 @@ def check_one(page_chromium, page_webkit, url: str) -> str:
     except Exception:
         return "unknown"
 
-# ---------- Sheet utils ----------
 def col_letter(n: int) -> str:
     s = ""
     while n > 0:
@@ -339,11 +327,9 @@ def get_worksheet_by_title(gc, sheet_id: str, desired_titles):
     for ws in sh.worksheets():
         if ws.title.strip().casefold() in want_norms:
             return ws
-    # fallback: first tab if not found
     return sh.worksheets()[0]
 
-# ---------- Runner ----------
-def run_sheet(gc, cfg, page_chromium, page_webkit):
+def run_sheet(gc, cfg, page_chromium):
     ws = get_worksheet_by_title(gc, cfg["sheet_id"], cfg["tabs"])
     values = ws.get_all_values()
     if not values:
@@ -392,20 +378,13 @@ def run_sheet(gc, cfg, page_chromium, page_webkit):
         started = time.monotonic()
         result = "unknown"
         try:
-            result = check_one(page_chromium, page_webkit, url)
+            result = check_one(page_chromium, url)
         except Exception:
             result = "unknown"
 
         if time.monotonic() - started > MAX_PER_LINK_S:
-            try:
-                page_chromium.close()
-            except Exception:
-                pass
-            try:
-                page_webkit.close()
-            except Exception:
-                pass
-            raise RuntimeError("Per-link watchdog tripped")
+            print("   → timeout | marking unknown and continuing")
+            result = "unknown"
 
         removal_date = today if result == "removed" else ""
         last_checked = today
@@ -437,20 +416,11 @@ def main():
         browser_chromium = p.chromium.launch(headless=True)
         context_chromium = browser_chromium.new_context(user_agent=USER_AGENT)
         page_chromium = context_chromium.new_page()
-
-        browser_webkit = p.webkit.launch(headless=True)
-        context_webkit = browser_webkit.new_context(user_agent=USER_AGENT)
-        page_webkit = context_webkit.new_page()
-
         try:
-            run_sheet(gc, cfg, page_chromium, page_webkit)
+            run_sheet(gc, cfg, page_chromium)
         finally:
             try:
                 browser_chromium.close()
-            except Exception:
-                pass
-            try:
-                browser_webkit.close()
             except Exception:
                 pass
 
