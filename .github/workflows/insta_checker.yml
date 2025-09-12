@@ -87,20 +87,24 @@ jobs:
           SHEET="${{ github.event.inputs.sheet || 'primary' }}"
           TOTAL="${{ github.event.inputs.total_shards || '8' }}"
           SKIP="${{ github.event.inputs.skip_recent_days || '0' }}"
+
           if ! [[ "$TOTAL" =~ ^[0-9]+$ && "$TOTAL" -ge 1 ]]; then TOTAL=8; fi
-          seq 0 $((TOTAL-1)) | paste -sd, - > /tmp/sh.csv
-          printf 'matrix={"include":[' > /tmp/m.json
-          i=0
-          for sh in $(cat /tmp/sh.csv | tr ',' ' '); do
-            [[ $i -gt 0 ]] && printf ',' >> /tmp/m.json
-            printf '{"sheet":"%s","shard":%s}' "$SHEET" "$sh" >> /tmp/m.json
-            i=$((i+1))
+
+          json='{"include":['
+          first=1
+          for sh in $(seq 0 $((TOTAL-1))); do
+            if [[ $first -eq 0 ]]; then json+=','; fi
+            json+='{"sheet":"'"$SHEET"'","shard":'"$sh"'}'
+            first=0
           done
-          printf ']}\n' >> /tmp/m.json
-          echo "matrix=$(cat /tmp/m.json)" >> "$GITHUB_OUTPUT"
+          json+=']}'
+
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
           echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
-          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+          echo "skip=$SKIP"   >> "$GITHUB_OUTPUT"
           echo "sheet=$SHEET" >> "$GITHUB_OUTPUT"
+
+          echo "Generated matrix: $json"
 
   manual:
     if: github.event_name == 'workflow_dispatch'
