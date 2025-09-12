@@ -2,7 +2,7 @@ name: Insta Checker
 
 on:
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       sheet:
@@ -44,7 +44,6 @@ jobs:
           pip install --upgrade "playwright>=1.47.1"
           playwright install --with-deps chromium webkit
       - name: Write Google credentials
-        shell: bash
         env:
           RAW_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           B64_JSON: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
@@ -57,12 +56,9 @@ jobs:
           fi
           test -s credentials.json
       - name: Refuse deprecated keyfile loader
-        shell: bash
         run: |
           if grep -nE 'from_json_keyfile_name[[:space:]]*\(' check_instagram_links.py; then
-            echo "ERROR: old keyfile_name loader found; refusing to run."
-            exit 1
-          fi
+            echo "ERROR"; exit 1; fi
       - name: Run checker (nightly shards)
         env:
           SHEET_NAME: ${{ env.SHEET_NAME }}
@@ -75,34 +71,27 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     outputs:
-      matrix: ${{ steps.mk.outputs.matrix }}
-      total:  ${{ steps.mk.outputs.total }}
-      skip:   ${{ steps.mk.outputs.skip }}
-      sheet:  ${{ steps.mk.outputs.sheet }}
+      matrix: ${{ steps.gen.outputs.matrix }}
+      total:  ${{ steps.gen.outputs.total }}
+      skip:   ${{ steps.gen.outputs.skip }}
+      sheet:  ${{ steps.gen.outputs.sheet }}
     steps:
-      - id: mk
-        shell: bash
+      - id: gen
         run: |
           set -euo pipefail
           SHEET="${{ github.event.inputs.sheet || 'primary' }}"
           TOTAL="${{ github.event.inputs.total_shards || '8' }}"
           SKIP="${{ github.event.inputs.skip_recent_days || '0' }}"
-
           [[ "$TOTAL" =~ ^[0-9]+$ ]] || TOTAL=8
-          (( TOTAL >= 1 )) || TOTAL=8
-
-          inc=''
+          SHARDS=""
           for ((i=0;i<TOTAL;i++)); do
-            [[ -n "$inc" ]] && inc="$inc,"
-            inc="$inc"{\"sheet\":\"$SHEET\",\"shard\":$i}
+            [[ -n "$SHARDS" ]] && SHARDS="$SHARDS,"
+            SHARDS="$SHARDS{\"sheet\":\"$SHEET\",\"shard\":$i}"
           done
-          MATRIX="{\"include\":[${inc}]}"
-          {
-            echo "matrix=$MATRIX"
-            echo "total=$TOTAL"
-            echo "skip=$SKIP"
-            echo "sheet=$SHEET"
-          } >> "$GITHUB_OUTPUT"
+          echo "matrix={\"include\":[$SHARDS]}" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+          echo "sheet=$SHEET" >> "$GITHUB_OUTPUT"
 
   manual:
     if: github.event_name == 'workflow_dispatch'
@@ -128,7 +117,6 @@ jobs:
           pip install --upgrade "playwright>=1.47.1"
           playwright install --with-deps chromium webkit
       - name: Write Google credentials
-        shell: bash
         env:
           RAW_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           B64_JSON: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
@@ -141,12 +129,9 @@ jobs:
           fi
           test -s credentials.json
       - name: Refuse deprecated keyfile loader
-        shell: bash
         run: |
           if grep -nE 'from_json_keyfile_name[[:space:]]*\(' check_instagram_links.py; then
-            echo "ERROR: old keyfile_name loader found; refusing to run."
-            exit 1
-          fi
+            echo "ERROR"; exit 1; fi
       - name: Run checker (manual shards)
         env:
           SHEET_NAME: ${{ env.SHEET_NAME }}

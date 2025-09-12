@@ -1,4 +1,3 @@
-# check_instagram_links.py
 import os
 import json
 import time
@@ -14,41 +13,39 @@ SHEETS = {
     "primary": {
         "sheet_id": "1sPsWqoEqd1YmD752fuz7j1K3VSGggpzlkc_Tp7Pr4jQ",
         "tabs": ["Logs"],
-        "url_col": 6,    # F
-        "status_col": 13,  # M
-        "removal_col": 14, # N
-        "checked_col": 15, # O
+        "url_col": 6,
+        "status_col": 13,
+        "removal_col": 14,
+        "checked_col": 15,
         "start_row": 2,
     },
     "fb_rm": {
         "sheet_id": "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY",
-        "tabs": ["Facebook RM Archives"],
-        "url_col": 10,   # J
-        "status_col": 15, # O
-        "removal_col": 16,# P
-        "checked_col": 17,# Q
+        "tabs": ["Facebook RM Archives", "Facebook RM Archive", "Facebook RM"],
+        "url_col": 10,
+        "status_col": 15,
+        "removal_col": 16,
+        "checked_col": 17,
         "start_row": 2,
     },
     "ig_rm": {
         "sheet_id": "1P698PUG-i578PdPm13MfrGo9svzK97sHw012isxisUY",
-        "tabs": ["Instagram RM Archives"],
-        "url_col": 10,   # J
-        "status_col": 15, # O
-        "removal_col": 16,# P
-        "checked_col": 17,# Q
+        "tabs": ["Instagram RM Archives", "Instagram RM Archive", "Instagram RM"],
+        "url_col": 10,
+        "status_col": 15,
+        "removal_col": 16,
+        "checked_col": 17,
         "start_row": 2,
     },
 }
 
 DELAY_RANGE = (4.0, 7.0)
-
 NAV_TIMEOUT_MS = 15000
 NETWORK_IDLE_MS = 7000
 SETTLE_SLEEP_S = 2.0
-ITEM_BUDGET_S = 30.0
-
 FLUSH_EVERY = 250
 SKIP_STATUS_VALUES = {"removed"}
+MAX_PER_LINK_S = 35.0
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -75,7 +72,7 @@ FB_REMOVAL = [
     "this content isn't available right now",
     "this page isn't available right now",
     "this video isn't available anymore",
-    "this page isn't available right now."
+    "post unavailable",
 ]
 
 THREADS_UNAVAILABLE_BADGE = "post unavailable"
@@ -119,17 +116,19 @@ def make_gspread_client():
     raise RuntimeError("Could not load Google credentials")
 
 def normalize_url(u: str) -> str:
-    u = (u or "").strip()
-    if not u:
-        return u
-    if u.startswith(("http://", "https://")):
-        return u
-    # Handle bare domains like facebook.com/...
-    if u.startswith("www."):
-        return "https://" + u
-    if any(u.startswith(dom) for dom in ("facebook.com", "instagram.com", "threads.net", "threads.com", "youtu.be", "youtube.com", "tiktok.com", "fb.watch")):
-        return "https://" + u
-    return u
+    s = (u or "").strip()
+    if not s:
+        return s
+    if s.startswith("//"):
+        s = "https:" + s
+    if not s.startswith("http://") and not s.startswith("https://"):
+        if s.startswith("facebook.com") or s.startswith("www.facebook.com"):
+            if not s.startswith("www."):
+                s = "www." + s
+            s = "https://" + s
+        else:
+            s = "https://" + s
+    return s
 
 def page_text(page) -> str:
     try:
@@ -174,37 +173,28 @@ def recent_enough(last_str: str, skip_days: int) -> bool:
         return False
     return (datetime.now() - d) < timedelta(days=skip_days)
 
-def safe_goto(page, url: str) -> "Response|None":
-    try:
-        return page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-    except PWTimeout:
-        try:
-            return page.goto(url, wait_until="networkidle", timeout=NAV_TIMEOUT_MS)
-        except Exception:
-            return None
-    except Exception:
-        return None
-
-def check_instagram(page_webkit, url: str) -> str:
-    start = time.monotonic()
-    page = page_webkit
+def check_instagram(page, url: str) -> str:
     page.set_default_navigation_timeout(NAV_TIMEOUT_MS)
     page.set_default_timeout(NAV_TIMEOUT_MS)
-    resp = safe_goto(page, url)
+    try:
+        page.goto(url, wait_until="domcontentloaded")
+    except PWTimeout:
+        try:
+            page.goto(url, wait_until="networkidle")
+        except Exception:
+            return "unknown"
+    except Exception:
+        return "unknown"
     try:
         page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
     except Exception:
         pass
     time.sleep(SETTLE_SLEEP_S)
     body = page_text(page)
-    cur_url = (page.url or "").lower()
-
+    cur_url = page.url or ""
     if contains_any(body, [p.lower() for p in INST_REMOVAL_PHRASES]):
         return "removed"
-    if "instagram.com/accounts/login" in cur_url:
-        # Behind login; look for unavailable markers present in bg
-        if "content isn't available" in body or "not available" in body:
-            return "removed"
+    if looks_like_login(body, cur_url):
         return "active"
     try:
         if page.query_selector("article, video, div[role='dialog']"):
@@ -213,27 +203,33 @@ def check_instagram(page_webkit, url: str) -> str:
             return "active"
     except Exception:
         pass
-
-    if (time.monotonic() - start) > ITEM_BUDGET_S:
-        return "unknown"
-    code = resp.status if resp else 0
-    return "active" if code and 200 <= code < 400 else "unknown"
+    return "unknown"
 
 def check_youtube(page, url: str) -> str:
-    resp = safe_goto(page, url)
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception:
+        return "unknown"
     body = page_text(page)
     if contains_any(body, [x.lower() for x in YT_REMOVAL]):
         return "removed"
     code = resp.status if resp else 0
-    return "active" if code and 200 <= code < 400 else "unknown"
+    if code and 200 <= code < 400:
+        return "active"
+    return "unknown"
 
 def check_tiktok(page, url: str) -> str:
-    resp = safe_goto(page, url)
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception:
+        return "unknown"
     body = page_text(page)
     if contains_any(body, [x.lower() for x in TT_REMOVAL]):
         return "removed"
     code = resp.status if resp else 0
-    return "active" if code and 200 <= code < 400 else "unknown"
+    if code and 200 <= code < 400:
+        return "active"
+    return "unknown"
 
 def dismiss_fb_login_modal(page):
     try:
@@ -257,30 +253,32 @@ def dismiss_fb_login_modal(page):
         pass
 
 def check_facebook(page, url: str) -> str:
-    resp = safe_goto(page, url)
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception:
+        return "unknown"
     try:
         page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
     except Exception:
         pass
     time.sleep(SETTLE_SLEEP_S)
-
     dismiss_fb_login_modal(page)
-
     body = page_text(page)
     cur_url = (page.url or "").lower()
-
     if contains_any(body, [x.lower() for x in FB_REMOVAL]):
         return "removed"
-
     if "facebook.com/watch/" in cur_url and "v=" not in cur_url:
         return "removed"
-
     code = resp.status if resp else 0
-    return "active" if code and 200 <= code < 400 else "unknown"
+    if code and 200 <= code < 400:
+        return "active"
+    return "unknown"
 
-def check_threads(page_webkit, url: str) -> str:
-    page = page_webkit
-    resp = safe_goto(page, url)
+def check_threads(page, url: str) -> str:
+    try:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    except Exception:
+        return "unknown"
     try:
         page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_MS)
     except Exception:
@@ -293,7 +291,9 @@ def check_threads(page_webkit, url: str) -> str:
     if THREADS_UNAVAILABLE_BADGE in body:
         return "removed"
     code = resp.status if resp else 0
-    return "active" if code and 200 <= code < 400 else "unknown"
+    if code and 200 <= code < 400:
+        return "active"
+    return "unknown"
 
 def check_one(page_chromium, page_webkit, url: str) -> str:
     p = host_platform(url)
@@ -306,10 +306,13 @@ def check_one(page_chromium, page_webkit, url: str) -> str:
     if p == "facebook":
         return check_facebook(page_chromium, url)
     if p == "threads":
-        return check_threads(page_webkit, url)
-    resp = safe_goto(page_chromium, url)
-    code = resp.status if resp else 0
-    return "active" if code and 200 <= code < 400 else "unknown"
+        return check_threads(page_chromium, url)
+    try:
+        resp = page_chromium.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        code = resp.status if resp else 0
+        return "active" if code and 200 <= code < 400 else "unknown"
+    except Exception:
+        return "unknown"
 
 def col_letter(n: int) -> str:
     s = ""
@@ -318,19 +321,18 @@ def col_letter(n: int) -> str:
         s = chr(65 + r) + s
     return s
 
-def get_worksheet_by_title(gc, sheet_id: str, title: str):
+def get_worksheet_by_title(gc, sheet_id: str, desired_titles):
     sh = gc.open_by_key(sheet_id)
-    try:
-        return sh.worksheet(title)
-    except gspread.WorksheetNotFound:
-        want = title.strip().lower()
-        for ws in sh.worksheets():
-            if ws.title.strip().lower() == want:
-                return ws
-        raise
+    titles = [ws.title for ws in sh.worksheets()]
+    want_norms = [t.strip().casefold() for t in desired_titles]
+    for ws in sh.worksheets():
+        if ws.title.strip().casefold() in want_norms:
+            return ws
+    # fallback: first tab if not found
+    return sh.worksheets()[0]
 
 def run_sheet(gc, cfg, page_chromium, page_webkit):
-    ws = get_worksheet_by_title(gc, cfg["sheet_id"], cfg["tabs"][0])
+    ws = get_worksheet_by_title(gc, cfg["sheet_id"], cfg["tabs"])
     values = ws.get_all_values()
     if not values:
         return
@@ -360,7 +362,8 @@ def run_sheet(gc, cfg, page_chromium, page_webkit):
             continue
 
         row = values[i]
-        url = normalize_url(row[URL_COL - 1] if len(row) >= URL_COL else "")
+        raw_url = row[URL_COL - 1] if len(row) >= URL_COL else ""
+        url = normalize_url(raw_url)
         status_now = (row[STATUS_COL - 1] if len(row) >= STATUS_COL else "").strip().lower()
         last_checked_str = (row[CHECKED_COL - 1] if len(row) >= CHECKED_COL else "").strip()
 
@@ -374,10 +377,22 @@ def run_sheet(gc, cfg, page_chromium, page_webkit):
             continue
 
         print(f"🔎 Checking row {row_idx}: {url}")
+        started = time.monotonic()
+        result = "unknown"
         try:
             result = check_one(page_chromium, page_webkit, url)
         except Exception:
             result = "unknown"
+        if time.monotonic() - started > MAX_PER_LINK_S:
+            try:
+                page_chromium.close()
+            except Exception:
+                pass
+            try:
+                page_webkit.close()
+            except Exception:
+                pass
+            raise RuntimeError("Per-link watchdog tripped")
 
         removal_date = today if result == "removed" else ""
         last_checked = today
@@ -407,25 +422,22 @@ def main():
 
     with sync_playwright() as p:
         browser_chromium = p.chromium.launch(headless=True)
-        context_c = browser_chromium.new_context(user_agent=USER_AGENT)
-        page_c = context_c.new_page()
+        context_chromium = browser_chromium.new_context(user_agent=USER_AGENT)
+        page_chromium = context_chromium.new_page()
 
         browser_webkit = p.webkit.launch(headless=True)
-        context_w = browser_webkit.new_context(user_agent=USER_AGENT)
-        page_w = context_w.new_page()
+        context_webkit = browser_webkit.new_context(user_agent=USER_AGENT)
+        page_webkit = context_webkit.new_page()
 
-        run_sheet(gc, cfg, page_c, page_w)
-
-        browser_c_pages = [page_c]
-        browser_w_pages = [page_w]
-        for pg in browser_c_pages:
+        try:
+            run_sheet(gc, cfg, page_chromium, page_webkit)
+        finally:
             try:
-                pg.context.browser.close()
+                browser_chromium.close()
             except Exception:
                 pass
-        for pg in browser_w_pages:
             try:
-                pg.context.browser.close()
+                browser_webkit.close()
             except Exception:
                 pass
 
